@@ -87,6 +87,7 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
         dynamic_callback_params: StandardCallbackDynamicParams,
         litellm_logging_obj: LiteLLMLoggingObj,
         tools: Optional[List[Dict]] = None,
+        prompt_label: Optional[str] = None,
     ) -> Tuple[str, List[AllMessageValues], dict]:
         """
         Returns:
@@ -104,6 +105,7 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
         prompt_id: Optional[str],
         prompt_variables: Optional[dict],
         dynamic_callback_params: StandardCallbackDynamicParams,
+        prompt_label: Optional[str] = None,
     ) -> Tuple[str, List[AllMessageValues], dict]:
         """
         Returns:
@@ -338,12 +340,14 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
     ):
         # Method definition
         try:
+            cache_hit = kwargs.get("cache_hit", False)
             kwargs["log_event_type"] = "post_api_call"
             await callback_func(
                 kwargs,  # kwargs to func
                 response_obj,
                 start_time,
                 end_time,
+                cache_hit
             )
         except Exception:
             print_verbose(f"Custom Logger Error - {traceback.format_exc()}")
