@@ -791,20 +791,39 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
 
     @staticmethod
-    def extract_cached_tokens(usage_metadata : UsageMetadata):
+    def extract_token_details(usage_metadata : UsageMetadata):
+        """
+        Extract token details from either cacheTokensDetails or promptTokensDetails.
+
+        Args:
+            usage_metadata: The usage metadata containing token details
+
+        Returns:
+            PromptTokensDetailsWrapper with the extracted token counts
+        """
         audio_tokens = 0
         text_tokens = 0
         image_tokens = 0
-        for detail in usage_metadata["promptTokensDetails"]:
-            if detail["modality"] == "AUDIO":
-                audio_tokens = detail["tokenCount"]
-            elif detail["modality"] == "TEXT":
-                text_tokens = detail["tokenCount"]
-            elif detail["modality"] == "IMAGE":
-                image_tokens = detail["tokenCount"]
+
+        # Use cachedContentTokenCount if available
+        prompt_metadata = usage_metadata.get("promptTokensDetails")
+        cached_tokens = usage_metadata.get("cachedContentTokenCount", 0)
+
+        # If cachedContentTokenCount is not available, extract from token details
+        if prompt_metadata is not None:
+            # First check cacheTokensDetails, then fall back to promptTokensDetails
+            token_details = prompt_metadata
+
+            for detail in token_details:
+                if detail["modality"] == "AUDIO":
+                    audio_tokens = detail["tokenCount"]
+                elif detail["modality"] == "TEXT":
+                    text_tokens = detail["tokenCount"]
+                elif detail["modality"] == "IMAGE":
+                    image_tokens = detail["tokenCount"]
 
         return PromptTokensDetailsWrapper(
-            cached_tokens=audio_tokens+text_tokens+image_tokens,
+            cached_tokens=cached_tokens,
             audio_tokens=audio_tokens,
             text_tokens=text_tokens,
             image_tokens=image_tokens,
@@ -839,7 +858,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         #########################################################
 
         if "promptTokensDetails" in completion_response["usageMetadata"]:
-            prompt_tokens_details = self.extract_cached_tokens(completion_response["usageMetadata"])
+            prompt_tokens_details = self.extract_token_details(completion_response["usageMetadata"])
 
         if "thoughtsTokenCount" in completion_response["usageMetadata"]:
             reasoning_tokens = completion_response["usageMetadata"][
@@ -857,6 +876,9 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         ):
             completion_tokens = reasoning_tokens + completion_tokens
         ## GET USAGE ##
+        # Extract cached content token count if available
+        cached_content_token_count = completion_response["usageMetadata"].get("cachedContentTokenCount")
+
         usage = Usage(
             prompt_tokens=completion_response["usageMetadata"].get(
                 "promptTokenCount", 0
@@ -866,6 +888,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
             prompt_tokens_details=prompt_tokens_details,
             reasoning_tokens=reasoning_tokens,
             completion_tokens_details=response_tokens_details,
+            cache_read_input_tokens=cached_content_token_count,
         )
 
         return usage
@@ -1648,9 +1671,10 @@ class ModelResponseIterator:
 
             if "usageMetadata" in processed_chunk:
                 prompt_tokens_details = None
-                if "promptTokensDetails" in processed_chunk["usageMetadata"]:
-                    prompt_tokens_details = VertexGeminiConfig.extract_cached_tokens(
+                if "cacheTokensDetails" in processed_chunk["usageMetadata"] or "promptTokensDetails" in processed_chunk["usageMetadata"]:
+                    prompt_tokens_details = VertexGeminiConfig.extract_token_details(
                         processed_chunk["usageMetadata"])
+
 
 
                 usage = ChatCompletionUsageBlock(
@@ -1668,7 +1692,7 @@ class ModelResponseIterator:
                         "reasoning_tokens": processed_chunk["usageMetadata"].get(
                             "thoughtsTokenCount", 0
                         )
-                    },
+                    }
                 )
 
             returned_chunk = GenericStreamingChunk(
@@ -1678,6 +1702,9 @@ class ModelResponseIterator:
                 finish_reason=finish_reason,
                 usage=usage,
                 index=0,
+                provider_specific_fields={
+                    "cached_content_token_count": processed_chunk["usageMetadata"].get("cachedContentTokenCount", 0)
+                }
             )
             return returned_chunk
         except json.JSONDecodeError:

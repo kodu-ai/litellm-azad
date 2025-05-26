@@ -986,6 +986,7 @@ class CustomStreamWrapper:
                     usage_data = anthropic_response_obj["usage"]
 
                     # Initialize token details
+                    cached_tokens = 0
                     audio_tokens = 0
                     text_tokens = 0
                     image_tokens = 0
@@ -1006,8 +1007,9 @@ class CustomStreamWrapper:
                             audio_tokens = prompt_tokens_details_dict["audio_tokens"]
                         if "image_tokens" in prompt_tokens_details_dict:
                             image_tokens = prompt_tokens_details_dict["image_tokens"]
+                        if "cached_tokens" in prompt_tokens_details_dict:
+                            cached_tokens = prompt_tokens_details_dict["cached_tokens"]
 
-                    cached_tokens = text_tokens + audio_tokens + image_tokens
                     prompt_tokens_details = litellm.types.utils.PromptTokensDetailsWrapper(
                         cached_tokens=cached_tokens,
                         audio_tokens=audio_tokens,
@@ -1019,7 +1021,7 @@ class CustomStreamWrapper:
                     setattr(
                         model_response,
                         "usage",
-                        litellm.Usage(
+                        Usage(
                             prompt_tokens=usage_data.get("prompt_tokens", 0),
                             completion_tokens=usage_data.get("completion_tokens", 0),
                             total_tokens=usage_data.get("total_tokens", 0),
@@ -1820,6 +1822,8 @@ class CustomStreamWrapper:
 
                         # Create a new object without the removed attribute
                         processed_chunk = self.model_response_creator(chunk=obj_dict)
+                        cache_hit = processed_chunk.get("cached_content_token_count", 0) > 0
+
                     print_verbose(f"final returned processed chunk: {processed_chunk}")
                     return processed_chunk
                 raise StopAsyncIteration
