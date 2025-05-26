@@ -1692,9 +1692,7 @@ class ModelResponseIterator:
                         "reasoning_tokens": processed_chunk["usageMetadata"].get(
                             "thoughtsTokenCount", 0
                         )
-                    },
-
-                    cache_read_input_tokens=cached_content_token_count,
+                    }
                 )
 
             returned_chunk = GenericStreamingChunk(
