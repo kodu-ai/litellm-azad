@@ -1702,6 +1702,9 @@ class ModelResponseIterator:
                 finish_reason=finish_reason,
                 usage=usage,
                 index=0,
+                provider_specific_fields={
+                    "cached_content_token_count": processed_chunk["usageMetadata"].get("cachedContentTokenCount", 0)
+                }
             )
             return returned_chunk
         except json.JSONDecodeError:
