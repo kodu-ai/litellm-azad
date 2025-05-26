@@ -1765,7 +1765,6 @@ class CustomStreamWrapper:
 
     async def __anext__(self):  # noqa: PLR0915
         cache_hit = False
-        # DAGO: Add a check for gemini cached tokens to signal a cache hit
         if (
             self.custom_llm_provider is not None
             and self.custom_llm_provider == "cached_response"
@@ -1824,6 +1823,8 @@ class CustomStreamWrapper:
 
                         # Create a new object without the removed attribute
                         processed_chunk = self.model_response_creator(chunk=obj_dict)
+                        cache_hit = processed_chunk.get("cached_content_token_count", 0) > 0
+
                     print_verbose(f"final returned processed chunk: {processed_chunk}")
                     return processed_chunk
                 raise StopAsyncIteration
