@@ -1021,7 +1021,6 @@ class CustomStreamWrapper:
                     setattr(
                         model_response,
                         "usage",
-                        # DAGO: Update the cache input and creation also through params
                         Usage(
                             prompt_tokens=usage_data.get("prompt_tokens", 0),
                             completion_tokens=usage_data.get("completion_tokens", 0),
