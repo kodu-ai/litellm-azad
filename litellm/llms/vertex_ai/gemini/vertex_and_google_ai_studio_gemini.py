@@ -806,12 +806,13 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         image_tokens = 0
 
         # Use cachedContentTokenCount if available
-        cached_tokens = usage_metadata.get("cachedContentTokenCount")
+        prompt_metadata = usage_metadata.get("promptTokensDetails")
+        cached_tokens = usage_metadata.get("cachedContentTokenCount", 0)
 
         # If cachedContentTokenCount is not available, extract from token details
-        if cached_tokens is None:
+        if prompt_metadata is not None:
             # First check cacheTokensDetails, then fall back to promptTokensDetails
-            token_details = usage_metadata.get("cacheTokensDetails") or usage_metadata.get("promptTokensDetails") or []
+            token_details = prompt_metadata
 
             for detail in token_details:
                 if detail["modality"] == "AUDIO":
@@ -1677,8 +1678,6 @@ class ModelResponseIterator:
                         processed_chunk["usageMetadata"])
 
 
-                # Extract cached content token count if available
-                cached_content_token_count = processed_chunk["usageMetadata"].get("cachedContentTokenCount")
 
                 usage = ChatCompletionUsageBlock(
                     prompt_tokens=processed_chunk["usageMetadata"].get(
@@ -1696,6 +1695,7 @@ class ModelResponseIterator:
                             "thoughtsTokenCount", 0
                         )
                     },
+
                     cache_read_input_tokens=cached_content_token_count,
                 )
 
