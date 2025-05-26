@@ -822,8 +822,6 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 elif detail["modality"] == "IMAGE":
                     image_tokens = detail["tokenCount"]
 
-            cached_tokens = audio_tokens + text_tokens + image_tokens
-
         return PromptTokensDetailsWrapper(
             cached_tokens=cached_tokens,
             audio_tokens=audio_tokens,
@@ -859,7 +857,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                     response_tokens_details.audio_tokens = detail["tokenCount"]
         #########################################################
 
-        if "cacheTokensDetails" in completion_response["usageMetadata"] or "promptTokensDetails" in completion_response["usageMetadata"]:
+        if "promptTokensDetails" in completion_response["usageMetadata"]:
             prompt_tokens_details = self.extract_token_details(completion_response["usageMetadata"])
 
         if "thoughtsTokenCount" in completion_response["usageMetadata"]:
