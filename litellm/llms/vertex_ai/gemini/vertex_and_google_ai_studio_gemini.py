@@ -1633,6 +1633,7 @@ class ModelResponseIterator:
             tool_use: Optional[ChatCompletionToolCallChunk] = None
             finish_reason = ""
             usage: Optional[ChatCompletionUsageBlock] = None
+            provider_specific_fields = {}
             _candidates: Optional[List[Candidates]] = processed_chunk.get("candidates")
             gemini_chunk: Optional[Candidates] = None
             if _candidates and len(_candidates) > 0:
@@ -1644,7 +1645,10 @@ class ModelResponseIterator:
                 and "parts" in gemini_chunk["content"]
             ):
                 if "text" in gemini_chunk["content"]["parts"][0]:
-                    text = gemini_chunk["content"]["parts"][0]["text"]
+                    if gemini_chunk["content"]["parts"][0].get("thought") is not None:
+                        provider_specific_fields["reasoning_content"]= gemini_chunk["content"]["parts"][0]["text"]
+                    else:
+                        text = gemini_chunk["content"]["parts"][0]["text"]
                 elif "functionCall" in gemini_chunk["content"]["parts"][0]:
                     function_call = ChatCompletionToolCallFunctionChunk(
                         name=gemini_chunk["content"]["parts"][0]["functionCall"][
@@ -1694,7 +1698,7 @@ class ModelResponseIterator:
                         )
                     }
                 )
-
+            provider_specific_fields["cached_content_token_count"] =  processed_chunk["usageMetadata"].get("cachedContentTokenCount", 0)
             returned_chunk = GenericStreamingChunk(
                 text=text,
                 tool_use=tool_use,
@@ -1702,9 +1706,7 @@ class ModelResponseIterator:
                 finish_reason=finish_reason,
                 usage=usage,
                 index=0,
-                provider_specific_fields={
-                    "cached_content_token_count": processed_chunk["usageMetadata"].get("cachedContentTokenCount", 0)
-                }
+                provider_specific_fields=provider_specific_fields
             )
             return returned_chunk
         except json.JSONDecodeError:
