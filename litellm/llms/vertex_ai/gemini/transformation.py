@@ -379,8 +379,6 @@ def _transform_request_body(
             data["safetySettings"] = safety_settings
         if generation_config is not None:
             data["generationConfig"] = generation_config
-        if cached_content is not None:
-            data["cachedContent"] = cached_content
     except Exception as e:
         raise e
 
