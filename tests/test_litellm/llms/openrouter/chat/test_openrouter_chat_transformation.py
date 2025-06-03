@@ -25,7 +25,11 @@ class TestOpenRouterChatCompletionStreamingHandler:
             "id": "test_id",
             "created": 1234567890,
             "model": "test_model",
-            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30
+            },
             "choices": [
                 {"delta": {"content": "test content", "reasoning": "test reasoning"}}
             ],
