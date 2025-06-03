@@ -271,7 +271,6 @@ class BaseLLMHTTPHandler:
     ):
         json_mode: bool = optional_params.pop("json_mode", False)
         extra_body: Optional[dict] = optional_params.pop("extra_body", None)
-        fake_stream = fake_stream or optional_params.pop("fake_stream", False)
 
         provider_config = (
             provider_config
@@ -283,6 +282,14 @@ class BaseLLMHTTPHandler:
             raise ValueError(
                 f"Provider config not found for model: {model} and provider: {custom_llm_provider}"
             )
+
+        fake_stream = (
+            fake_stream
+            or optional_params.pop("fake_stream", False)
+            or provider_config.should_fake_stream(
+                model=model, custom_llm_provider=custom_llm_provider, stream=stream
+            )
+        )
 
         # get config from model, custom llm provider
         headers = provider_config.validate_environment(
@@ -832,7 +839,7 @@ class BaseLLMHTTPHandler:
             response = await async_httpx_client.post(
                 url=api_base,
                 headers=headers,
-                data=json.dumps(request_data),
+                json=request_data,
                 timeout=timeout,
             )
         except Exception as e:
@@ -1090,7 +1097,10 @@ class BaseLLMHTTPHandler:
             if provider_specific_header
             else {}
         )
-        headers = anthropic_messages_provider_config.validate_environment(
+        (
+            headers,
+            api_base,
+        ) = anthropic_messages_provider_config.validate_anthropic_messages_environment(
             headers=extra_headers or {},
             model=model,
             messages=messages,
@@ -1323,7 +1333,7 @@ class BaseLLMHTTPHandler:
                 response = sync_httpx_client.post(
                     url=api_base,
                     headers=headers,
-                    data=json.dumps(data),
+                    json=data,
                     timeout=timeout
                     or response_api_optional_request_params.get("timeout"),
                     stream=stream,
@@ -1351,7 +1361,7 @@ class BaseLLMHTTPHandler:
                 response = sync_httpx_client.post(
                     url=api_base,
                     headers=headers,
-                    data=json.dumps(data),
+                    json=data,
                     timeout=timeout
                     or response_api_optional_request_params.get("timeout"),
                 )
@@ -1444,7 +1454,7 @@ class BaseLLMHTTPHandler:
                 response = await async_httpx_client.post(
                     url=api_base,
                     headers=headers,
-                    data=json.dumps(data),
+                    json=data,
                     timeout=timeout
                     or response_api_optional_request_params.get("timeout"),
                     stream=stream,
@@ -1474,7 +1484,7 @@ class BaseLLMHTTPHandler:
                 response = await async_httpx_client.post(
                     url=api_base,
                     headers=headers,
-                    data=json.dumps(data),
+                    json=data,
                     timeout=timeout
                     or response_api_optional_request_params.get("timeout"),
                 )
@@ -1550,7 +1560,7 @@ class BaseLLMHTTPHandler:
 
         try:
             response = await async_httpx_client.delete(
-                url=url, headers=headers, data=json.dumps(data), timeout=timeout
+                url=url, headers=headers, json=data, timeout=timeout
             )
 
         except Exception as e:
@@ -1634,7 +1644,7 @@ class BaseLLMHTTPHandler:
 
         try:
             response = sync_httpx_client.delete(
-                url=url, headers=headers, data=json.dumps(data), timeout=timeout
+                url=url, headers=headers, json=data, timeout=timeout
             )
 
         except Exception as e:
@@ -2166,6 +2176,7 @@ class BaseLLMHTTPHandler:
             headers.update(extra_headers)
 
         api_base = image_edit_provider_config.get_complete_url(
+            model=model,
             api_base=litellm_params.api_base,
             litellm_params=dict(litellm_params),
         )
@@ -2250,6 +2261,7 @@ class BaseLLMHTTPHandler:
             headers.update(extra_headers)
 
         api_base = image_edit_provider_config.get_complete_url(
+            model=model,
             api_base=litellm_params.api_base,
             litellm_params=dict(litellm_params),
         )

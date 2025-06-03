@@ -18,7 +18,9 @@ from litellm.litellm_core_utils.prompt_templates.factory import anthropic_messag
 from litellm.llms.base_llm.base_utils import type_to_response_format_param
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.types.llms.anthropic import (
+    AllAnthropicMessageValues,
     AllAnthropicToolsValues,
+    AnthropicCodeExecutionTool,
     AnthropicComputerTool,
     AnthropicHostedTools,
     AnthropicInputSchema,
@@ -49,6 +51,7 @@ from litellm.utils import (
     Usage,
     add_dummy_tool,
     has_tool_call_blocks,
+    supports_reasoning,
     token_counter,
 )
 
@@ -62,7 +65,7 @@ else:
     LoggingClass = Any
 
 
-ANTHROPIC_HOSTED_TOOLS = ["web_search", "bash", "text_editor"]
+ANTHROPIC_HOSTED_TOOLS = ["web_search", "bash", "text_editor", "code_execution"]
 
 
 class AnthropicConfig(AnthropicModelInfo, BaseConfig):
@@ -121,7 +124,10 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             "web_search_options",
         ]
 
-        if "claude-3-7-sonnet" in model:
+        if "claude-3-7-sonnet" in model or supports_reasoning(
+            model=model,
+            custom_llm_provider=self.custom_llm_provider,
+        ):
             params.append("thinking")
 
         return params
@@ -526,6 +532,40 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
 
         return anthropic_system_message_list
 
+    def add_code_execution_tool(
+        self,
+        messages: List[AllAnthropicMessageValues],
+        tools: List[Union[AllAnthropicToolsValues, Dict]],
+    ) -> List[Union[AllAnthropicToolsValues, Dict]]:
+        """if 'container_upload' in messages, add code_execution tool"""
+        add_code_execution_tool = False
+        for message in messages:
+            message_content = message.get("content", None)
+            if message_content and isinstance(message_content, list):
+                for content in message_content:
+                    content_type = content.get("type", None)
+                    if content_type == "container_upload":
+                        add_code_execution_tool = True
+                        break
+
+        if add_code_execution_tool:
+            ## check if code_execution tool is already in tools
+            for tool in tools:
+                tool_type = tool.get("type", None)
+                if (
+                    tool_type
+                    and isinstance(tool_type, str)
+                    and tool_type.startswith("code_execution")
+                ):
+                    return tools
+            tools.append(
+                AnthropicCodeExecutionTool(
+                    name="code_execution",
+                    type="code_execution_20250522",
+                )
+            )
+        return tools
+
     def transform_request(
         self,
         model: str,
@@ -574,6 +614,18 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 status_code=400,
                 message="{}\nReceived Messages={}".format(str(e), messages),
             )  # don't use verbose_logger.exception, if exception is raised
+
+        ## Add code_execution tool if container_upload is in messages
+        _tools = (
+            cast(
+                Optional[List[Union[AllAnthropicToolsValues, Dict]]],
+                optional_params.get("tools"),
+            )
+            or []
+        )
+        tools = self.add_code_execution_tool(messages=anthropic_messages, tools=_tools)
+        if len(tools) > 1:
+            optional_params["tools"] = tools
 
         ## Load Config
         config = litellm.AnthropicConfig.get_config()

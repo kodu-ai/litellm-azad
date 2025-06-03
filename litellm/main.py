@@ -59,6 +59,7 @@ from litellm.constants import (
 from litellm.exceptions import LiteLLMUnknownProvider
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.audio_utils.utils import get_audio_file_for_health_check
+from litellm.litellm_core_utils.dd_tracing import tracer
 from litellm.litellm_core_utils.health_check_utils import (
     _create_health_check_response,
     _filter_model_params,
@@ -86,6 +87,7 @@ from litellm.utils import (
     ProviderConfigManager,
     Usage,
     add_openai_metadata,
+    add_provider_specific_params_to_optional_params,
     async_mock_completion_streaming_obj,
     convert_to_model_response_object,
     create_pretrained_tokenizer,
@@ -93,12 +95,14 @@ from litellm.utils import (
     get_api_key,
     get_llm_provider,
     get_non_default_completion_params,
+    get_non_default_transcription_params,
     get_optional_params_embeddings,
     get_optional_params_image_gen,
     get_optional_params_transcription,
     get_secret,
     get_standard_openai_params,
     mock_completion_streaming_obj,
+    pre_process_non_default_params,
     read_config_args,
     supports_httpx_timeout,
     token_counter,
@@ -125,7 +129,7 @@ from .litellm_core_utils.prompt_templates.factory import (
     stringify_json_tool_call_content,
 )
 from .litellm_core_utils.streaming_chunk_builder_utils import ChunkProcessor
-from .llms import baseten, maritalk, ollama_chat
+from .llms import baseten
 from .llms.anthropic.chat import AnthropicChatCompletion
 from .llms.azure.audio_transcriptions import AzureAudioTranscription
 from .llms.azure.azure import AzureChatCompletion, _check_dynamic_azure_params
@@ -311,6 +315,7 @@ class AsyncCompletions:
         return response
 
 
+@tracer.wrap()
 @client
 async def acompletion(
     model: str,
@@ -807,6 +812,7 @@ def mock_completion(
         raise Exception("Mock completion response failed - {}".format(e))
 
 
+@tracer.wrap()
 @client
 def completion(  # type: ignore # noqa: PLR0915
     model: str,
@@ -985,7 +991,6 @@ def completion(  # type: ignore # noqa: PLR0915
         assistant_continue_message=assistant_continue_message,
     )
     ######## end of unpacking kwargs ###########
-    standard_openai_params = get_standard_openai_params(params=args)
     non_default_params = get_non_default_completion_params(kwargs=kwargs)
     litellm_params = {}  # used to prevent unbound var errors
     ## PROMPT MANAGEMENT HOOKS ##
@@ -1140,42 +1145,53 @@ def completion(  # type: ignore # noqa: PLR0915
         if dynamic_api_key is not None:
             api_key = dynamic_api_key
         # check if user passed in any of the OpenAI optional params
-        optional_params = get_optional_params(
-            functions=functions,
-            function_call=function_call,
-            temperature=temperature,
-            top_p=top_p,
-            n=n,
-            stream=stream,
-            stream_options=stream_options,
-            stop=stop,
-            max_tokens=max_tokens,
-            max_completion_tokens=max_completion_tokens,
-            modalities=modalities,
-            prediction=prediction,
-            audio=audio,
-            presence_penalty=presence_penalty,
-            frequency_penalty=frequency_penalty,
-            logit_bias=logit_bias,
-            user=user,
+        optional_param_args = {
+            "functions": functions,
+            "function_call": function_call,
+            "temperature": temperature,
+            "top_p": top_p,
+            "n": n,
+            "stream": stream,
+            "stream_options": stream_options,
+            "stop": stop,
+            "max_tokens": max_tokens,
+            "max_completion_tokens": max_completion_tokens,
+            "modalities": modalities,
+            "prediction": prediction,
+            "audio": audio,
+            "presence_penalty": presence_penalty,
+            "frequency_penalty": frequency_penalty,
+            "logit_bias": logit_bias,
+            "user": user,
             # params to identify the model
+            "model": model,
+            "custom_llm_provider": custom_llm_provider,
+            "response_format": response_format,
+            "seed": seed,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "max_retries": max_retries,
+            "logprobs": logprobs,
+            "top_logprobs": top_logprobs,
+            "api_version": api_version,
+            "parallel_tool_calls": parallel_tool_calls,
+            "messages": messages,
+            "reasoning_effort": reasoning_effort,
+            "thinking": thinking,
+            "web_search_options": web_search_options,
+            "allowed_openai_params": kwargs.get("allowed_openai_params"),
+        }
+        optional_params = get_optional_params(
+            **optional_param_args, **non_default_params
+        )
+        processed_non_default_params = pre_process_non_default_params(
             model=model,
+            passed_params=optional_param_args,
+            special_params=non_default_params,
             custom_llm_provider=custom_llm_provider,
-            response_format=response_format,
-            seed=seed,
-            tools=tools,
-            tool_choice=tool_choice,
-            max_retries=max_retries,
-            logprobs=logprobs,
-            top_logprobs=top_logprobs,
-            api_version=api_version,
-            parallel_tool_calls=parallel_tool_calls,
-            messages=messages,
-            reasoning_effort=reasoning_effort,
-            thinking=thinking,
-            web_search_options=web_search_options,
-            allowed_openai_params=kwargs.get("allowed_openai_params"),
-            **non_default_params,
+            additional_drop_params=kwargs.get("additional_drop_params"),
+            remove_sensitive_keys=True,
+            add_provider_specific_params=True,
         )
 
         if litellm.add_function_to_prompt and optional_params.get(
@@ -1241,10 +1257,7 @@ def completion(  # type: ignore # noqa: PLR0915
         cast(LiteLLMLoggingObj, logging).update_environment_variables(
             model=model,
             user=user,
-            optional_params={
-                **standard_openai_params,
-                **non_default_params,
-            },  # [IMPORTANT] - using standard_openai_params ensures consistent params logged to langfuse for finetuning / eval datasets.
+            optional_params=processed_non_default_params,  # [IMPORTANT] - using processed_non_default_params ensures consistent params logged to langfuse for finetuning / eval datasets.
             litellm_params=litellm_params,
             custom_llm_provider=custom_llm_provider,
         )
@@ -1765,6 +1778,7 @@ def completion(  # type: ignore # noqa: PLR0915
             or custom_llm_provider == "mistral"
             or custom_llm_provider == "openai"
             or custom_llm_provider == "together_ai"
+            or custom_llm_provider == "nebius"
             or custom_llm_provider in litellm.openai_compatible_providers
             or "ft:gpt-3.5-turbo" in model  # finetune gpt-3.5-turbo
         ):  # allow user to make an openai call with a custom base
@@ -2324,6 +2338,26 @@ def completion(  # type: ignore # noqa: PLR0915
                     original_response=response,
                     additional_args={"headers": headers},
                 )
+
+        elif custom_llm_provider == "datarobot":
+            response = base_llm_http_handler.completion(
+                model=model,
+                messages=messages,
+                headers=headers,
+                model_response=model_response,
+                api_key=api_key,
+                api_base=api_base,
+                acompletion=acompletion,
+                logging_obj=logging,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                timeout=timeout,  # type: ignore
+                client=client,
+                custom_llm_provider=custom_llm_provider,
+                encoding=encoding,
+                stream=stream,
+                provider_config=provider_config,
+            )
         elif custom_llm_provider == "openrouter":
             api_base = (
                 api_base
@@ -2946,23 +2980,24 @@ def completion(  # type: ignore # noqa: PLR0915
                 or os.environ.get("OLLAMA_API_KEY")
                 or litellm.api_key
             )
-            ## LOGGING
-            generator = ollama_chat.get_ollama_response(
-                api_base=api_base,
-                api_key=api_key,
+
+            response = base_llm_http_handler.completion(
                 model=model,
+                stream=stream,
                 messages=messages,
-                optional_params=optional_params,
-                logging_obj=logging,
                 acompletion=acompletion,
+                api_base=api_base,
                 model_response=model_response,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                custom_llm_provider="ollama_chat",
+                timeout=timeout,
+                headers=headers,
                 encoding=encoding,
+                api_key=api_key,
+                logging_obj=logging,  # model call logging done inside the class as we make need to modify I/O to fit aleph alpha's requirements
                 client=client,
             )
-            if acompletion is True or optional_params.get("stream", False) is True:
-                return generator
-
-            response = generator
 
         elif custom_llm_provider == "triton":
             api_base = litellm.api_base or api_base
@@ -3920,6 +3955,27 @@ def embedding(  # noqa: PLR0915
                 client=client,
                 aembedding=aembedding,
             )
+        elif custom_llm_provider == "nebius":
+            api_key = api_key or litellm.api_key or get_secret_str("NEBIUS_API_KEY")
+            api_base = (
+                api_base
+                or litellm.api_base
+                or get_secret_str("NEBIUS_API_BASE")
+                or "api.studio.nebius.ai/v1"
+            )
+
+            response = openai_chat_completions.embedding(
+                model=model,
+                input=input,
+                api_base=api_base,
+                api_key=api_key,
+                logging_obj=logging,
+                timeout=timeout,
+                model_response=EmbeddingResponse(),
+                optional_params=optional_params,
+                client=client,
+                aembedding=aembedding,
+            )
         elif custom_llm_provider == "voyage":
             response = base_llm_http_handler.embedding(
                 model=model,
@@ -4026,6 +4082,32 @@ def embedding(  # noqa: PLR0915
                 optional_params=optional_params,
                 client=client,
                 aembedding=aembedding,
+            )
+        elif custom_llm_provider in litellm._custom_providers:
+            custom_handler: Optional[CustomLLM] = None
+            for item in litellm.custom_provider_map:
+                if item["provider"] == custom_llm_provider:
+                    custom_handler = item["custom_handler"]
+
+            if custom_handler is None:
+                raise LiteLLMUnknownProvider(
+                    model=model, custom_llm_provider=custom_llm_provider
+                )
+
+            handler_fn = (
+                custom_handler.embedding
+                if not aembedding
+                else custom_handler.aembedding
+            )
+
+            response = handler_fn(
+                model=model,
+                input=input,
+                logging_obj=logging,
+                optional_params=optional_params,
+                model_response=EmbeddingResponse(),
+                print_verbose=print_verbose,
+                litellm_params=litellm_params,
             )
         else:
             raise LiteLLMUnknownProvider(
@@ -4672,8 +4754,8 @@ def transcription(
     litellm_logging_obj: LiteLLMLoggingObj = kwargs.get("litellm_logging_obj")  # type: ignore
     extra_headers = kwargs.get("extra_headers", None)
     kwargs.pop("tags", [])
+    non_default_params = get_non_default_transcription_params(kwargs)
 
-    drop_params = kwargs.get("drop_params", None)
     client: Optional[
         Union[
             openai.AsyncOpenAI,
@@ -4706,7 +4788,7 @@ def transcription(
         timestamp_granularities=timestamp_granularities,
         temperature=temperature,
         custom_llm_provider=custom_llm_provider,
-        drop_params=drop_params,
+        **non_default_params,
     )
     litellm_params_dict = get_litellm_params(**kwargs)
 
