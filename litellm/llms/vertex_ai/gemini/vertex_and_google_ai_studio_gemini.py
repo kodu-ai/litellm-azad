@@ -69,7 +69,7 @@ from litellm.types.utils import (
     GenericStreamingChunk,
     PromptTokensDetailsWrapper,
     TopLogprob,
-    Usage,
+    Usage, ModelResponseStream, StreamingChoices, Delta,
 )
 from litellm.utils import CustomStreamWrapper, ModelResponse, is_base64_encoded, supports_reasoning
 
@@ -1850,7 +1850,6 @@ class ModelResponseIterator:
 
             args: Dict[str, Any] = {
                 "content": text or None,
-                "reasoning_content": reasoning_content,
             }
             if self.is_function_call and tool_use is not None:
                 args["function_call"] = tool_use["function"]
