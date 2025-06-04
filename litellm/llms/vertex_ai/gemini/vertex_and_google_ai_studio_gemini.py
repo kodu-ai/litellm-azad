@@ -1774,30 +1774,33 @@ class ModelResponseIterator:
         self.logging_obj = logging_obj
         self.is_function_call = check_is_function_call(logging_obj)
 
-    def chunk_parser(self, chunk: dict) -> GenericStreamingChunk:
+    def chunk_parser(self, chunk: dict) -> "ModelResponseStream":
         try:
+            from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
             processed_chunk = GenerateContentResponseBody(**chunk)  # type: ignore
 
             text = ""
+            reasoning_content = None
             tool_use: Optional[ChatCompletionToolCallChunk] = None
             finish_reason = ""
-            usage: Optional[ChatCompletionUsageBlock] = None
-            provider_specific_fields = {}
+            usage: Optional[Usage] = None
             _candidates: Optional[List[Candidates]] = processed_chunk.get("candidates")
             gemini_chunk: Optional[Candidates] = None
             if _candidates and len(_candidates) > 0:
                 gemini_chunk = _candidates[0]
 
             if (
-                gemini_chunk
-                and "content" in gemini_chunk
-                and "parts" in gemini_chunk["content"]
+                    gemini_chunk
+                    and "content" in gemini_chunk
+                    and "parts" in gemini_chunk["content"]
             ):
                 if "text" in gemini_chunk["content"]["parts"][0]:
-                    if gemini_chunk["content"]["parts"][0].get("thought") is not None:
-                        provider_specific_fields["reasoning_content"]= gemini_chunk["content"]["parts"][0]["text"]
+                    if gemini_chunk["content"]["parts"][0].get("thought"):
+                        reasoning_content = gemini_chunk["content"]["parts"][0]["text"]
                     else:
                         text = gemini_chunk["content"]["parts"][0]["text"]
+
                 elif "functionCall" in gemini_chunk["content"]["parts"][0]:
                     function_call = ChatCompletionToolCallFunctionChunk(
                         name=gemini_chunk["content"]["parts"][0]["functionCall"][
@@ -1823,33 +1826,13 @@ class ModelResponseIterator:
                 ## GEMINI SETS FINISHREASON ON EVERY CHUNK!
 
             if "usageMetadata" in processed_chunk:
-                prompt_tokens_details = None
-                if "cacheTokensDetails" in processed_chunk["usageMetadata"] or "promptTokensDetails" in processed_chunk["usageMetadata"]:
-                    prompt_tokens_details = VertexGeminiConfig.extract_token_details(
-                        processed_chunk["usageMetadata"])
-
-
-
-                usage = ChatCompletionUsageBlock(
-                    prompt_tokens=processed_chunk["usageMetadata"].get(
-                        "promptTokenCount", 0
-                    ),
-                    completion_tokens=processed_chunk["usageMetadata"].get(
-                        "candidatesTokenCount", 0
-                    ),
-                    total_tokens=processed_chunk["usageMetadata"].get(
-                        "totalTokenCount", 0
-                    ),
-                    prompt_tokens_details=prompt_tokens_details.to_dict() if prompt_tokens_details else None,
-                    completion_tokens_details={
-                        "reasoning_tokens": processed_chunk["usageMetadata"].get(
-                            "thoughtsTokenCount", 0
-                        )
-                    }
+                usage = VertexGeminiConfig._calculate_usage(
+                    completion_response=processed_chunk,
                 )
 
             args: Dict[str, Any] = {
                 "content": text or None,
+                "reasoning_content": reasoning_content,
             }
             if self.is_function_call and tool_use is not None:
                 args["function_call"] = tool_use["function"]
@@ -1865,8 +1848,6 @@ class ModelResponseIterator:
                     )
                 ],
                 usage=usage,
-                index=0,
-                provider_specific_fields=provider_specific_fields
             )
             return returned_chunk
         except json.JSONDecodeError:
