@@ -953,74 +953,80 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
             image_tokens=image_tokens,
         )
 
+    @staticmethod
     def _calculate_usage(
-        self,
-        completion_response: Union[
-            GenerateContentResponseBody, BidiGenerateContentServerMessage
-        ],
+            completion_response: Union[
+                GenerateContentResponseBody, BidiGenerateContentServerMessage
+            ],
     ) -> Usage:
-        if "usageMetadata" not in completion_response:
+        if (
+                completion_response is not None
+                and "usageMetadata" not in completion_response
+        ):
             raise ValueError(
                 f"usageMetadata not found in completion_response. Got={completion_response}"
             )
-
+        cached_tokens: Optional[int] = None
+        audio_tokens: Optional[int] = None
+        text_tokens: Optional[int] = None
+        prompt_tokens_details: Optional[PromptTokensDetailsWrapper] = None
         reasoning_tokens: Optional[int] = None
         response_tokens: Optional[int] = None
-        prompt_tokens_details: Optional[PromptTokensDetailsWrapper] = None
         response_tokens_details: Optional[CompletionTokensDetailsWrapper] = None
+        usage_metadata = completion_response["usageMetadata"]
+        if "cachedContentTokenCount" in usage_metadata:
+            cached_tokens = usage_metadata["cachedContentTokenCount"]
 
         ## GEMINI LIVE API ONLY PARAMS ##
-        if "responseTokenCount" in completion_response["usageMetadata"]:
-            response_tokens = completion_response["usageMetadata"]["responseTokenCount"]
-        if "responseTokensDetails" in completion_response["usageMetadata"]:
+        if "responseTokenCount" in usage_metadata:
+            response_tokens = usage_metadata["responseTokenCount"]
+        if "responseTokensDetails" in usage_metadata:
             response_tokens_details = CompletionTokensDetailsWrapper()
-            for detail in completion_response["usageMetadata"]["responseTokensDetails"]:
+            for detail in usage_metadata["responseTokensDetails"]:
                 if detail["modality"] == "TEXT":
                     response_tokens_details.text_tokens = detail["tokenCount"]
                 elif detail["modality"] == "AUDIO":
                     response_tokens_details.audio_tokens = detail["tokenCount"]
         #########################################################
 
-        if "promptTokensDetails" in completion_response["usageMetadata"]:
-            prompt_tokens_details = self.extract_token_details(completion_response["usageMetadata"])
-
-        if "thoughtsTokenCount" in completion_response["usageMetadata"]:
-            reasoning_tokens = completion_response["usageMetadata"][
-                "thoughtsTokenCount"
-            ]
+        if "promptTokensDetails" in usage_metadata:
+            for detail in usage_metadata["promptTokensDetails"]:
+                if detail["modality"] == "AUDIO":
+                    audio_tokens = detail["tokenCount"]
+                elif detail["modality"] == "TEXT":
+                    text_tokens = detail["tokenCount"]
+        if "thoughtsTokenCount" in usage_metadata:
+            reasoning_tokens = usage_metadata["thoughtsTokenCount"]
+        prompt_tokens_details = PromptTokensDetailsWrapper(
+            cached_tokens=cached_tokens,
+            audio_tokens=audio_tokens,
+            text_tokens=text_tokens,
+        )
 
         completion_tokens = response_tokens or completion_response["usageMetadata"].get(
             "candidatesTokenCount", 0
         )
         if (
-            not self.is_candidate_token_count_inclusive(
-                completion_response["usageMetadata"]
-            )
-            and reasoning_tokens
+                not VertexGeminiConfig.is_candidate_token_count_inclusive(usage_metadata)
+                and reasoning_tokens
         ):
             completion_tokens = reasoning_tokens + completion_tokens
         ## GET USAGE ##
-        # Extract cached content token count if available
-        cached_content_token_count = completion_response["usageMetadata"].get("cachedContentTokenCount")
-
         usage = Usage(
-            prompt_tokens=completion_response["usageMetadata"].get(
-                "promptTokenCount", 0
-            ),
+            prompt_tokens=usage_metadata.get("promptTokenCount", 0),
             completion_tokens=completion_tokens,
-            total_tokens=completion_response["usageMetadata"].get("totalTokenCount", 0),
+            total_tokens=usage_metadata.get("totalTokenCount", 0),
             prompt_tokens_details=prompt_tokens_details,
             reasoning_tokens=reasoning_tokens,
             completion_tokens_details=response_tokens_details,
-            cache_read_input_tokens=cached_content_token_count,
         )
 
         return usage
 
     def _check_finish_reason(
-        self,
-        chat_completion_message: Optional[ChatCompletionResponseMessage],
-        finish_reason: Optional[str],
+            self,
+            chat_completion_message: Optional[ChatCompletionResponseMessage],
+            finish_reason: Optional[str],
     ) -> OpenAIChatCompletionFinishReason:
         mapped_finish_reason = self.get_finish_reason_mapping()
         if chat_completion_message and chat_completion_message.get("function_call"):
@@ -1028,7 +1034,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         elif chat_completion_message and chat_completion_message.get("tool_calls"):
             return "tool_calls"
         elif (
-            finish_reason and finish_reason in mapped_finish_reason.keys()
+                finish_reason and finish_reason in mapped_finish_reason.keys()
         ):  # vertex ai
             return mapped_finish_reason[finish_reason]
         else:
