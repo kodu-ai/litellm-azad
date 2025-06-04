@@ -896,7 +896,8 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
         return model_response
 
-    def is_candidate_token_count_inclusive(self, usage_metadata: UsageMetadata) -> bool:
+    @staticmethod
+    def is_candidate_token_count_inclusive(usage_metadata: UsageMetadata) -> bool:
         """
         Check if the candidate token count is inclusive of the thinking token count
 
