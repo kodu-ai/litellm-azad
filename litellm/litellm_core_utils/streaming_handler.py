@@ -431,6 +431,7 @@ class CustomStreamWrapper:
             finish_reason = None
             logprobs = None
             usage = None
+            thinking_blocks = None
 
             if str_line and str_line.choices and len(str_line.choices) > 0:
                 if (
@@ -459,10 +460,17 @@ class CustomStreamWrapper:
                     logprobs = str_line.choices[0].logprobs
                 else:
                     logprobs = None
+                
+                # Preserve thinking_blocks if present in delta
+                if (
+                    hasattr(str_line.choices[0].delta, "thinking_blocks")
+                    and str_line.choices[0].delta.thinking_blocks is not None
+                ):
+                    thinking_blocks = str_line.choices[0].delta.thinking_blocks
 
             usage = getattr(str_line, "usage", None)
 
-            return {
+            result = {
                 "text": text,
                 "is_finished": is_finished,
                 "finish_reason": finish_reason,
@@ -470,6 +478,11 @@ class CustomStreamWrapper:
                 "original_chunk": str_line,
                 "usage": usage,
             }
+            
+            if thinking_blocks is not None:
+                result["thinking_blocks"] = thinking_blocks
+            
+            return result
         except Exception as e:
             raise e
 
@@ -745,6 +758,10 @@ class CustomStreamWrapper:
                 and model_response.choices[0].delta.annotations is not None
             )
             or response_obj.get("usage") is not None
+            or (
+                "thinking_blocks" in response_obj
+                and response_obj["thinking_blocks"] is not None
+            )
         ):
             return True
         else:
@@ -784,12 +801,23 @@ class CustomStreamWrapper:
                                     choice_json.pop(
                                         "finish_reason", None
                                     )  # for mistral etc. which return a value in their last chunk (not-openai compatible).
+                                    
+                                    # Preserve thinking_blocks from the choice_json if present
+                                    # Check if delta exists and has thinking_blocks
+                                    if 'delta' in choice_json and isinstance(choice_json['delta'], dict):
+                                        delta_dict = choice_json['delta']
+                                        # thinking_blocks should already be in the delta dict from model_dump()
+                                        # but let's ensure it's preserved
+                                        if 'thinking_blocks' in delta_dict and delta_dict['thinking_blocks'] is not None:
+                                            print_verbose(f"Preserving thinking_blocks: {delta_dict['thinking_blocks']}")
+                                    
                                     print_verbose(f"choice_json: {choice_json}")
                                     choices.append(StreamingChoices(**choice_json))
                             except Exception:
                                 choices.append(StreamingChoices())
                         print_verbose(f"choices in streaming: {choices}")
                         setattr(model_response, "choices", choices)
+                        
                     else:
                         return
                     model_response.system_fingerprint = (
@@ -804,12 +832,24 @@ class CustomStreamWrapper:
                     if self.sent_first_chunk is False:
                         model_response.choices[0].delta["role"] = "assistant"
                         self.sent_first_chunk = True
+                        
+                        # Preserve thinking_blocks from response_obj if present
+                        if response_obj.get("thinking_blocks") is not None:
+                            # Get the current delta dict
+                            delta_dict = model_response.choices[0].delta.model_dump() if hasattr(model_response.choices[0].delta, "model_dump") else {}
+                            delta_dict["thinking_blocks"] = response_obj["thinking_blocks"]
+                            model_response.choices[0].delta = Delta(**delta_dict)
                     elif self.sent_first_chunk is True and hasattr(
                         model_response.choices[0].delta, "role"
                     ):
                         _initial_delta = model_response.choices[0].delta.model_dump()
 
                         _initial_delta.pop("role", None)
+                        
+                        # Preserve thinking_blocks from response_obj if present
+                        if response_obj.get("thinking_blocks") is not None:
+                            _initial_delta["thinking_blocks"] = response_obj["thinking_blocks"]
+                            
                         model_response.choices[0].delta = Delta(**_initial_delta)
                     verbose_logger.debug(
                         f"model_response.choices[0].delta: {model_response.choices[0].delta}"
@@ -824,6 +864,11 @@ class CustomStreamWrapper:
                         completion_obj["provider_specific_fields"] = response_obj[
                             "provider_specific_fields"
                         ]
+                    
+                    # Preserve thinking_blocks from response_obj if present
+                    if response_obj.get("thinking_blocks") is not None:
+                        completion_obj["thinking_blocks"] = response_obj["thinking_blocks"]
+                    
                     model_response.choices[0].delta = Delta(**completion_obj)
                     _index: Optional[int] = completion_obj.get("index")
                     if _index is not None:
@@ -1055,7 +1100,20 @@ class CustomStreamWrapper:
                     ].items():
                         setattr(model_response, key, value)
 
+                # Preserve thinking_blocks if present
+                if (
+                    "thinking_blocks" in anthropic_response_obj
+                    and anthropic_response_obj["thinking_blocks"] is not None
+                ):
+                    response_obj["thinking_blocks"] = anthropic_response_obj["thinking_blocks"]
+
                 response_obj = cast(Dict[str, Any], anthropic_response_obj)
+                
+                # Also check if thinking_blocks are in the Delta for OpenRouter and other providers
+                if hasattr(model_response, 'choices') and len(model_response.choices) > 0:
+                    delta = model_response.choices[0].delta
+                    if hasattr(delta, 'thinking_blocks') and delta.thinking_blocks is not None:
+                        response_obj["thinking_blocks"] = delta.thinking_blocks
             elif self.model == "replicate" or self.custom_llm_provider == "replicate":
                 response_obj = self.handle_replicate_chunk(chunk)
                 completion_obj["content"] = response_obj["text"]
@@ -1274,7 +1332,22 @@ class CustomStreamWrapper:
                     if isinstance(chunk, BaseModel) and hasattr(chunk, "model"):
                         # for azure, we need to pass the model from the orignal chunk
                         self.model = getattr(chunk, "model", self.model)
+                
+                # For OpenRouter, capture thinking_blocks from model_response BEFORE calling handle_openai_chat_completion_chunk
+                # This happens when the provider-specific chunk_parser creates them
+                thinking_blocks_to_preserve = None
+                if self.custom_llm_provider == "openrouter" and hasattr(model_response, 'choices') and len(model_response.choices) > 0:
+                    delta = model_response.choices[0].delta
+                    if hasattr(delta, 'thinking_blocks') and delta.thinking_blocks is not None:
+                        thinking_blocks_to_preserve = delta.thinking_blocks
+                
                 response_obj = self.handle_openai_chat_completion_chunk(chunk)
+                
+                # Add preserved thinking_blocks to response_obj so chunk isn't dropped
+                if thinking_blocks_to_preserve is not None:
+                    if response_obj is None:
+                        response_obj = {}
+                    response_obj["thinking_blocks"] = thinking_blocks_to_preserve
                 if response_obj is None:
                     return
                 completion_obj["content"] = response_obj["text"]

@@ -135,17 +135,33 @@ class OpenRouterChatCompletionStreamingHandler(BaseModelResponseIterator):
                     )
 
                     # Process reasoning_details safely
-                    print(f"Choice: {choice}")
                     reasoning_details = choice["delta"].get("reasoning_details")
-                    if reasoning_details and isinstance(reasoning_details, list) and len(reasoning_details) > 0:
-                        first_thinking_block = reasoning_details[0]
-                        if (isinstance(first_thinking_block, dict) and 
-                            first_thinking_block.get("type") == "reasoning.text" and
-                            "signature" in first_thinking_block):
-                            # Initialize thinking_blocks if it doesn't exist
-                            if "thinking_blocks" not in choice["delta"]:
-                                choice["delta"]["thinking_blocks"] = {}
-                            choice["delta"]["thinking_blocks"]["signature"] = first_thinking_block["signature"]
+                    if reasoning_details and isinstance(reasoning_details, list):
+                        # Initialize thinking_blocks as a list if it doesn't exist
+                        if "thinking_blocks" not in choice["delta"]:
+                            choice["delta"]["thinking_blocks"] = []
+                        
+                        # Look for signature in reasoning_details
+                        signature = None
+                        text_content = ""
+                        
+                        for detail in reasoning_details:
+                            if isinstance(detail, dict):
+                                # Check if this detail has a signature
+                                if "signature" in detail and detail["signature"]:
+                                    signature = detail["signature"]
+                                # Check if this detail has text content
+                                if detail.get("type") == "reasoning.text" and detail.get("text"):
+                                    text_content = detail["text"]
+                        
+                        # If we found a signature, create a thinking block
+                        if signature:
+                            thinking_block = {
+                                "type": "thinking", 
+                                "thinking": text_content,
+                                "signature": signature
+                            }
+                            choice["delta"]["thinking_blocks"].append(thinking_block)
 
                     delta = Delta(**choice["delta"])
 
