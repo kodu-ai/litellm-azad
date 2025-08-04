@@ -515,12 +515,14 @@ async def acompletion(
         func_with_context = partial(ctx.run, func)
 
         init_response = await loop.run_in_executor(None, func_with_context)
+        
         if isinstance(init_response, dict) or isinstance(
             init_response, ModelResponse
         ):  ## CACHING SCENARIO
             if isinstance(init_response, dict):
                 response = ModelResponse(**init_response)
-            response = init_response
+            else:
+                response = init_response
         elif asyncio.iscoroutine(init_response):
             response = await init_response
         else:
@@ -534,10 +536,12 @@ async def acompletion(
                 response_object=response,
                 model_response_object=litellm.ModelResponse(),
             )
+        
         if isinstance(response, CustomStreamWrapper):
             response.set_logging_event_loop(
                 loop=loop
             )  # sets the logging event loop if the user does sync streaming (e.g. on proxy for sagemaker calls)
+        
         return response
     except Exception as e:
         custom_llm_provider = custom_llm_provider or "openai"

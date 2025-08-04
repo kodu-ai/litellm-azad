@@ -1572,6 +1572,7 @@ class CustomStreamWrapper:
                     chunk = self.completion_stream
                 else:
                     chunk = next(self.completion_stream)
+                
                 if chunk is not None and chunk != b"":
                     print_verbose(
                         f"PROCESSED CHUNK PRE CHUNK CREATOR: {chunk}; custom_llm_provider: {self.custom_llm_provider}"
@@ -1618,10 +1619,12 @@ class CustomStreamWrapper:
                             chunk=obj_dict, hidden_params=response._hidden_params
                         )
                     # add usage as hidden param
-                if self.sent_last_chunk is True and self.stream_options is None:
-                    response._hidden_params["usage"] = self.final_usage_obj
-                # RETURN RESULT
-                return response
+                    if self.sent_last_chunk is True and self.stream_options is None:
+                        response._hidden_params["usage"] = self.final_usage_obj
+                    # RETURN RESULT
+                    return response
+                else:
+                    pass
 
         except StopIteration:
             if self.sent_last_chunk is True:
