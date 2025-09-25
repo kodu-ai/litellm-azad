@@ -18,6 +18,7 @@ from litellm.types.utils import (
     PromptTokensDetailsWrapper,
     StreamingChoices,
     Usage,
+    PromptTokensDetailsWrapper,
 )
 
 

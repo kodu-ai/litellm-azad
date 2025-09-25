@@ -120,7 +120,7 @@ def test_generic_cost_per_token_above_200k_tokens():
 
     model_cost_map = litellm.model_cost[model]
     prompt_tokens = 220 * 1e6
-    completion_tokens = 150
+    completion_tokens = 250000  # Above 200k
     usage = Usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

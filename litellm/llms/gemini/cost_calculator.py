@@ -10,13 +10,20 @@ if TYPE_CHECKING:
     from litellm.types.utils import ModelInfo, Usage
 
 
+
 def cost_per_token(model: str, usage: "Usage") -> Tuple[float, float]:
     """
     Calculates the cost per token for a given model, prompt tokens, and completion tokens.
 
-    Follows the same logic as Anthropic's cost per token calculation.
+    Input:
+        - model: str, the model name without provider prefix
+        - usage: Usage object containing token counts
+
+    Returns:
+        Tuple[float, float] - prompt_cost_in_usd, completion_cost_in_usd
     """
     from litellm.litellm_core_utils.llm_cost_calc.utils import generic_cost_per_token
+
 
     return generic_cost_per_token(
         model=model, usage=usage, custom_llm_provider="gemini"

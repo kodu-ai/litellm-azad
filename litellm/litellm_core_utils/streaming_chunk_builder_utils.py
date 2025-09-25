@@ -2,6 +2,7 @@ import base64
 import time
 from typing import Any, Dict, List, Optional, Union, cast
 
+from litellm.types.utils import PromptTokensDetailsWrapper
 from litellm.types.llms.openai import (
     ChatCompletionAssistantContentValue,
     ChatCompletionAudioDelta,
@@ -257,8 +258,8 @@ class ChunkProcessor:
         ## anthropic prompt caching information ##
         cache_creation_input_tokens: Optional[int] = None
         cache_read_input_tokens: Optional[int] = None
-        completion_tokens_details: Optional[CompletionTokensDetails] = None
-        prompt_tokens_details: Optional[PromptTokensDetails] = None
+        completion_tokens_details: Optional[CompletionTokensDetailsWrapper] = None
+        prompt_tokens_details: Optional[PromptTokensDetailsWrapper] = None
 
         if "prompt_tokens" in usage_chunk:
             prompt_tokens = usage_chunk.get("prompt_tokens", 0) or 0
@@ -283,7 +284,7 @@ class ChunkProcessor:
                 completion_tokens_details = usage_chunk.completion_tokens_details
         if hasattr(usage_chunk, "prompt_tokens_details"):
             if isinstance(usage_chunk.prompt_tokens_details, dict):
-                prompt_tokens_details = PromptTokensDetails(
+                prompt_tokens_details = PromptTokensDetailsWrapper(
                     **usage_chunk.prompt_tokens_details
                 )
             elif isinstance(usage_chunk.prompt_tokens_details, PromptTokensDetails):
@@ -317,6 +318,7 @@ class ChunkProcessor:
     def _process_usage_chunks(
         self, chunks: List[Union[Dict[str, Any], ModelResponse]]
     ) -> Dict[str, Any]:
+
         """
         Process chunks to extract usage information.
         """
@@ -328,6 +330,7 @@ class ChunkProcessor:
         cache_read_input_tokens: Optional[int] = None
         completion_tokens_details: Optional[CompletionTokensDetails] = None
         prompt_tokens_details: Optional[PromptTokensDetails] = None
+
 
         for chunk in chunks:
             usage_chunk: Optional[Usage] = None
@@ -467,6 +470,7 @@ class ChunkProcessor:
 
         returned_usage = self._set_additional_usage_properties(
             returned_usage, usage_data, reasoning_tokens
+
         )
 
         # Return a new usage object with the new values

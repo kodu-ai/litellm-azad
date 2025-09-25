@@ -68,7 +68,7 @@ from litellm.types.utils import (
     CompletionTokensDetailsWrapper,
     PromptTokensDetailsWrapper,
     TopLogprob,
-    Usage,
+    Usage, ModelResponseStream, StreamingChoices, Delta,
 )
 from litellm.utils import (
     CustomStreamWrapper,
@@ -1003,6 +1003,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         if (
             completion_response is not None
             and "usageMetadata" not in completion_response
+
         ):
             raise ValueError(
                 f"usageMetadata not found in completion_response. Got={completion_response}"
@@ -1036,6 +1037,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                     audio_tokens = detail.get("tokenCount", 0)
                 elif detail["modality"] == "TEXT":
                     text_tokens = detail.get("tokenCount", 0)
+
         if "thoughtsTokenCount" in usage_metadata:
             reasoning_tokens = usage_metadata["thoughtsTokenCount"]
         prompt_tokens_details = PromptTokensDetailsWrapper(
@@ -1050,6 +1052,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         if (
             not VertexGeminiConfig.is_candidate_token_count_inclusive(usage_metadata)
             and reasoning_tokens
+
         ):
             completion_tokens = reasoning_tokens + completion_tokens
         ## GET USAGE ##
@@ -1068,6 +1071,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
     def _check_finish_reason(
         chat_completion_message: Optional[ChatCompletionResponseMessage],
         finish_reason: Optional[str],
+
     ) -> OpenAIChatCompletionFinishReason:
         mapped_finish_reason = VertexGeminiConfig.get_finish_reason_mapping()
         if chat_completion_message and chat_completion_message.get("function_call"):
@@ -1075,7 +1079,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         elif chat_completion_message and chat_completion_message.get("tool_calls"):
             return "tool_calls"
         elif (
-            finish_reason and finish_reason in mapped_finish_reason.keys()
+                finish_reason and finish_reason in mapped_finish_reason.keys()
         ):  # vertex ai
             return mapped_finish_reason[finish_reason]
         else:
@@ -1950,6 +1954,7 @@ class ModelResponseIterator:
                     citation_metadata,
                 ) = VertexGeminiConfig._process_candidates(
                     _candidates, model_response, self.logging_obj.optional_params
+
                 )
                 setattr(model_response, "vertex_ai_grounding_metadata", grounding_metadata)  # type: ignore
                 setattr(model_response, "vertex_ai_url_context_metadata", url_context_metadata)  # type: ignore
