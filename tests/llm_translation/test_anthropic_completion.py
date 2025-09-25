@@ -263,6 +263,156 @@ def test_anthropic_tool_streaming():
             assert tool_use["index"] == correct_tool_index
 
 
+# Web search chunk list based on actual Anthropic API response for web search
+anthropic_web_search_chunk_list = [
+    {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    },
+    {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": "I'll search for information about the weather in Miami for you."},
+    },
+    {"type": "content_block_stop", "index": 0},
+    {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+            "type": "server_tool_use",
+            "id": "srvtoolu_01ABC123DEF456",
+            "name": "web_search"
+        },
+    },
+    {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {"type": "partial_json", "partial_json": '{"que'},
+    },
+    {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {"type": "partial_json", "partial_json": 'ry": "Miami weath'},
+    },
+    {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {"type": "partial_json", "partial_json": 'er today"}'},
+    },
+    {"type": "content_block_stop", "index": 1},
+    {
+        "type": "content_block_start",
+        "index": 2,
+        "content_block": {
+            "type": "web_search_tool_result",
+            "web_search_result": {
+                "query": "Miami weather today",
+                "search_results": [
+                    {
+                        "url": "https://weather.com/weather/today/l/Miami+FL",
+                        "title": "Miami, FL Weather Today",
+                        "snippet": "Today's weather in Miami, FL. Current conditions and forecast."
+                    },
+                    {
+                        "url": "https://forecast.weather.gov/MapClick.php?lat=25.7743&lon=-80.1937",
+                        "title": "National Weather Service - Miami",
+                        "snippet": "Official weather forecast for Miami from the National Weather Service."
+                    }
+                ]
+            }
+        },
+    },
+    {"type": "content_block_stop", "index": 2},
+    {
+        "type": "content_block_start",
+        "index": 3,
+        "content_block": {"type": "text", "text": ""},
+    },
+    {
+        "type": "content_block_delta",
+        "index": 3,
+        "delta": {"type": "text_delta", "text": "Based on my search, "},
+    },
+    {
+        "type": "content_block_delta",
+        "index": 3,
+        "delta": {"type": "text_delta", "text": "here's the current weather information for Miami:"},
+    },
+    {"type": "content_block_stop", "index": 3},
+    {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": 85},
+    },
+    {"type": "message_stop"},
+]
+
+
+def test_anthropic_web_search_streaming():
+    """
+    Test that Anthropic web search streaming properly preserves:
+    1. server_tool_use content blocks
+    2. web_search_tool_result content blocks  
+    3. Tool call arguments accumulation
+    4. Provider-specific fields containing web search data
+    
+    This test demonstrates the exact bug that test_anthropic_tool_streaming() 
+    doesn't catch - handling of server_tool_use and web_search_tool_result blocks.
+    """
+    litellm.set_verbose = True
+    response_iter = ModelResponseIterator([], False)
+
+    # Track collected data
+    collected_tool_calls = []
+    collected_provider_fields = []
+    collected_texts = []
+    
+    # Process each chunk
+    for chunk in anthropic_web_search_chunk_list:
+        parsed_chunk = response_iter.chunk_parser(chunk)
+        
+        # Collect tool calls - they're nested in choices[0].delta.tool_calls
+        if parsed_chunk.choices and parsed_chunk.choices[0].delta.tool_calls:
+            for tool_call in parsed_chunk.choices[0].delta.tool_calls:
+                collected_tool_calls.append(tool_call)
+            
+        # Collect provider-specific fields - they're nested in choices[0].delta.provider_specific_fields
+        if parsed_chunk.choices and parsed_chunk.choices[0].delta.provider_specific_fields:
+            provider_fields = parsed_chunk.choices[0].delta.provider_specific_fields
+            collected_provider_fields.append(provider_fields)
+            
+        # Collect text content - it's in choices[0].delta.content
+        if parsed_chunk.choices and parsed_chunk.choices[0].delta.content:
+            text = parsed_chunk.choices[0].delta.content
+            collected_texts.append(text)
+    
+    # The key differences from test_anthropic_tool_streaming:
+    # 1. This tests server_tool_use vs tool_use content blocks
+    # 2. This tests partial_json vs input_json_delta  
+    # 3. This tests data preservation, not just indexing
+    # 4. This tests provider_specific_fields preservation
+    
+    assert len(collected_tool_calls) > 0, "Should have at least one tool call (server_tool_use)"
+    
+    assert len(collected_provider_fields) > 0, "Should have provider-specific fields"
+    
+    server_tool_calls = [tc for tc in collected_tool_calls if tc.id and "srvtoolu_" in str(tc.id)]
+    assert len(server_tool_calls) > 0, "Should have server_tool_use tool calls"
+    
+    main_tool_call = server_tool_calls[0]
+    assert main_tool_call.type == "function"
+    assert main_tool_call.function.name == "web_search"
+    
+    server_tool_use_fields = [pf for pf in collected_provider_fields if "server_tool_use" in pf]
+    web_search_result_fields = [pf for pf in collected_provider_fields if "web_search_tool_result" in pf]
+    
+    assert len(server_tool_use_fields) > 0, "Should have server_tool_use in provider_specific_fields"
+    assert len(web_search_result_fields) > 0, "Should have web_search_tool_result in provider_specific_fields"
+    
+    print("✅ Web search streaming test passed - our fix works!")
+
+
 def test_process_anthropic_headers_empty():
     result = process_anthropic_headers({})
     assert result == {}, "Expected empty dictionary for no input"
@@ -422,7 +572,7 @@ def test_anthropic_tool_helper(cache_control_location):
     else:
         tool["cache_control"] = {"type": "ephemeral"}
 
-    tool = AnthropicConfig()._map_tool_helper(tool=tool)
+    tool, _ = AnthropicConfig()._map_tool_helper(tool=tool)
 
     assert tool["cache_control"] == {"type": "ephemeral"}
 
@@ -481,7 +631,6 @@ class TestAnthropicCompletion(BaseLLMChatTest, BaseAnthropicChatTest):
 
         result = convert_to_anthropic_tool_invoke([tool_call_no_arguments])
         print(result)
-
 
     def test_tool_call_and_json_response_format(self):
         """
@@ -888,7 +1037,7 @@ def test_anthropic_citations_api():
     """
     from litellm import completion
 
-    try: 
+    try:
         resp = completion(
             model="claude-3-5-sonnet-20241022",
             messages=[
@@ -994,7 +1143,6 @@ def test_anthropic_thinking_output(model):
     assert resp.choices[0].message.thinking_blocks[0]["signature"] is not None
 
 
-
 @pytest.mark.parametrize(
     "model",
     [
@@ -1031,12 +1179,13 @@ def test_anthropic_thinking_output_stream(model):
                 print(chunk.choices[0].delta.thinking_blocks[0])
                 if chunk.choices[0].delta.thinking_blocks[0].get("signature"):
                     signature_block_exists = True
-                    assert chunk.choices[0].delta.thinking_blocks[0]["type"] == "thinking"
+                    assert (
+                        chunk.choices[0].delta.thinking_blocks[0]["type"] == "thinking"
+                    )
         assert reasoning_content_exists
         assert signature_block_exists
     except litellm.Timeout:
         pytest.skip("Model is timing out")
-
 
 
 def test_anthropic_custom_headers():
@@ -1113,7 +1262,6 @@ def test_anthropic_thinking_in_assistant_message(model):
     response = litellm.completion(**params)
 
     assert response is not None
-
 
 
 @pytest.mark.parametrize(
@@ -1216,6 +1364,7 @@ async def test_anthropic_api_max_completion_tokens(model: str):
             "model": model.split("/")[-1],
         }
 
+
 @pytest.mark.parametrize(
     "optional_params",
     [
@@ -1226,17 +1375,15 @@ async def test_anthropic_api_max_completion_tokens(model: str):
         #         "max_uses": 5
         #     }]
         # },
-        {
-            "web_search_options": {} 
-        }
-    ]
+        {"web_search_options": {}}
+    ],
 )
 def test_anthropic_websearch(optional_params: dict):
     litellm._turn_on_debug()
     params = {
         "model": "anthropic/claude-3-5-sonnet-latest",
         "messages": [{"role": "user", "content": "Who won the World Cup in 2022?"}],
-        **optional_params
+        **optional_params,
     }
 
     try:
@@ -1257,18 +1404,116 @@ def test_anthropic_text_editor():
         "messages": [
             {
                 "role": "user",
-                "content": "There'\''s a syntax error in my primes.py file. Can you help me fix it?"
+                "content": "There'''s a syntax error in my primes.py file. Can you help me fix it?",
             }
         ],
-        "tools": [{
-            "type": "text_editor_20250124",
-            "name": "str_replace_editor"
-        }]
+        "tools": [{"type": "text_editor_20250124", "name": "str_replace_editor"}],
     }
-    
+
     try:
         response = litellm.completion(**params)
     except litellm.InternalServerError as e:
         print(e)
 
     assert response is not None
+
+
+@pytest.mark.parametrize("spec", ["anthropic", "openai"])
+def test_anthropic_mcp_server_tool_use(spec: str):
+    litellm._turn_on_debug()
+
+    if spec == "anthropic":
+        tools = [
+            {
+                "type": "url",
+                "url": "https://mcp.deepwiki.com/mcp",
+                "name": "deepwiki-mcp",
+            }
+        ]
+    elif spec == "openai":
+        tools = [
+            {
+                "type": "mcp",
+                "server_label": "deepwiki",
+                "server_url": "https://mcp.deepwiki.com/mcp",
+                "require_approval": "never",
+            },
+        ]
+
+    params = {
+        "model": "anthropic/claude-sonnet-4-20250514",
+        "messages": [{"role": "user", "content": "Who won the World Cup in 2022?"}],
+        "tools": tools,
+    }
+
+    try:
+        response = litellm.completion(**params)
+    except litellm.InternalServerError as e:
+        print(e)
+
+    assert response is not None
+
+
+@pytest.mark.parametrize(
+    "model", ["openai/gpt-4.1", "anthropic/claude-sonnet-4-20250514"]
+)
+def test_anthropic_mcp_server_responses_api(model: str):
+    from litellm import responses
+
+    tools = [
+        {
+            "type": "mcp",
+            "server_label": "deepwiki",
+            "server_url": "https://mcp.deepwiki.com/mcp",
+            "require_approval": "never",
+        },
+    ]
+
+    response = litellm.responses(
+        model=model,
+        input="Who won the World Cup in 2022?",
+        max_output_tokens=100,
+        tools=tools,
+    )
+
+    assert response is not None
+
+
+def test_anthropic_prefix_prompt():
+    params = {
+        "model": "anthropic/claude-3-5-sonnet-latest",
+        "messages": [
+            {"role": "user", "content": "Who won the World Cup in 2022?"},
+            {"role": "assistant", "content": "Argentina", "prefix": True},
+        ],
+    }
+
+    response = litellm.completion(**params)
+    print(f"response: {response}")
+    assert response is not None
+    assert response.choices[0].message.content.startswith("Argentina")
+
+
+@pytest.mark.asyncio
+async def test_claude_tool_use_with_anthropic_acreate():
+    response = await litellm.anthropic.messages.acreate(
+        messages=[
+            {"role": "user", "content": "Hello, can you tell me the weather in Boston?"}
+        ],
+        model="anthropic/claude-3-5-sonnet-20240620",
+        stream=True,
+        max_tokens=100,
+        tools=[
+            {
+                "name": "get_weather",
+                "description": "Get current weather information for a specific location",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                },
+            }
+        ],
+    )
+
+    async for chunk in response:
+        print(chunk)

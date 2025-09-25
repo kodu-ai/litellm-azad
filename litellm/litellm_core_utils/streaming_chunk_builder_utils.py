@@ -108,9 +108,9 @@ class ChunkProcessor:
         self, tool_call_chunks: List[Dict[str, Any]]
     ) -> List[ChatCompletionMessageToolCall]:
         tool_calls_list: List[ChatCompletionMessageToolCall] = []
-        tool_call_map: Dict[
-            int, Dict[str, Any]
-        ] = {}  # Map to store tool calls by index
+        tool_call_map: Dict[int, Dict[str, Any]] = (
+            {}
+        )  # Map to store tool calls by index
 
         for chunk in tool_call_chunks:
             choices = chunk["choices"]
@@ -253,6 +253,8 @@ class ChunkProcessor:
     def _usage_chunk_calculation_helper(self, usage_chunk: Usage) -> dict:
         prompt_tokens = 0
         completion_tokens = 0
+        cost: Optional[float] = None
+        is_byok: Optional[bool] = None
         ## anthropic prompt caching information ##
         cache_creation_input_tokens: Optional[int] = None
         cache_read_input_tokens: Optional[int] = None
@@ -263,6 +265,10 @@ class ChunkProcessor:
             prompt_tokens = usage_chunk.get("prompt_tokens", 0) or 0
         if "completion_tokens" in usage_chunk:
             completion_tokens = usage_chunk.get("completion_tokens", 0) or 0
+        if "cost" in usage_chunk:
+            cost = usage_chunk.get("cost")
+        if "is_byok" in usage_chunk:
+            is_byok = usage_chunk.get("is_byok")
         if "cache_creation_input_tokens" in usage_chunk:
             cache_creation_input_tokens = usage_chunk.get("cache_creation_input_tokens")
         if "cache_read_input_tokens" in usage_chunk:
@@ -287,6 +293,8 @@ class ChunkProcessor:
         return {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "cost": cost,
+            "is_byok": is_byok,
             "cache_creation_input_tokens": cache_creation_input_tokens,
             "cache_read_input_tokens": cache_read_input_tokens,
             "completion_tokens_details": completion_tokens_details,
@@ -307,65 +315,23 @@ class ChunkProcessor:
 
         return reasoning_tokens
 
-    def _set_token_details(
-        self,
-        returned_usage: Usage,
-        cache_creation_input_tokens: Optional[int],
-        cache_read_input_tokens: Optional[int],
-        completion_tokens_details: Optional[CompletionTokensDetails],
-        prompt_tokens_details: Optional[PromptTokensDetailsWrapper],
-        reasoning_tokens: Optional[int],
-    ) -> None:
-        """
-        Helper method to set token details on the usage object
-        """
-        if cache_creation_input_tokens is not None:
-            returned_usage._cache_creation_input_tokens = cache_creation_input_tokens
-            returned_usage.cache_creation_input_tokens = cache_creation_input_tokens
-        if cache_read_input_tokens is not None:
-            returned_usage._cache_read_input_tokens = cache_read_input_tokens
-            returned_usage.cache_read_input_tokens = cache_read_input_tokens
+    def _process_usage_chunks(
+        self, chunks: List[Union[Dict[str, Any], ModelResponse]]
+    ) -> Dict[str, Any]:
 
-        if completion_tokens_details is not None:
-            if isinstance(completion_tokens_details, CompletionTokensDetails) and not isinstance(completion_tokens_details, CompletionTokensDetailsWrapper):
-                returned_usage.completion_tokens_details = CompletionTokensDetailsWrapper(**completion_tokens_details.model_dump())
-            else:
-                returned_usage.completion_tokens_details = completion_tokens_details
-
-        if reasoning_tokens is not None:
-            if returned_usage.completion_tokens_details is None:
-                returned_usage.completion_tokens_details = (
-                    CompletionTokensDetailsWrapper(reasoning_tokens=reasoning_tokens)
-                )
-            elif (
-                returned_usage.completion_tokens_details is not None
-                and returned_usage.completion_tokens_details.reasoning_tokens is None
-            ):
-                returned_usage.completion_tokens_details.reasoning_tokens = reasoning_tokens
-
-        if prompt_tokens_details is not None:
-            returned_usage.prompt_tokens_details = prompt_tokens_details
-
-    def calculate_usage(
-        self,
-        chunks: List[Union[Dict[str, Any], ModelResponse]],
-        model: str,
-        completion_output: str,
-        messages: Optional[List] = None,
-        reasoning_tokens: Optional[int] = None,
-    ) -> Usage:
         """
-        Calculate usage for the given chunks.
+        Process chunks to extract usage information.
         """
-        returned_usage = Usage()
-        # # Update usage information if needed
         prompt_tokens = 0
         completion_tokens = 0
-        ## anthropic prompt caching information ##
+        cost: Optional[float] = None
+        is_byok: Optional[bool] = None
         cache_creation_input_tokens: Optional[int] = None
         cache_read_input_tokens: Optional[int] = None
         completion_tokens_details: Optional[CompletionTokensDetails] = None
-        prompt_tokens_details: Optional[PromptTokensDetailsWrapper] = None
+        prompt_tokens_details: Optional[PromptTokensDetails] = None
+
+
         for chunk in chunks:
             usage_chunk: Optional[Usage] = None
             if "usage" in chunk:
@@ -388,6 +354,14 @@ class ChunkProcessor:
                     and usage_chunk_dict["completion_tokens"] > 0
                 ):
                     completion_tokens = usage_chunk_dict["completion_tokens"]
+                if usage_chunk_dict["cost"] is not None and (
+                    usage_chunk_dict["cost"] > 0 or cost is None
+                ):
+                    cost = usage_chunk_dict["cost"]
+                if usage_chunk_dict["is_byok"] is not None and (
+                    usage_chunk_dict["is_byok"] is True or is_byok is None
+                ):
+                    is_byok = usage_chunk_dict["is_byok"]
                 if usage_chunk_dict["cache_creation_input_tokens"] is not None and (
                     usage_chunk_dict["cache_creation_input_tokens"] > 0
                     or cache_creation_input_tokens is None
@@ -407,8 +381,73 @@ class ChunkProcessor:
                         "completion_tokens_details"
                     ]
                 prompt_tokens_details = usage_chunk_dict["prompt_tokens_details"]
+
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cost": cost,
+            "is_byok": is_byok,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "completion_tokens_details": completion_tokens_details,
+            "prompt_tokens_details": prompt_tokens_details,
+        }
+
+    def _set_additional_usage_properties(
+        self,
+        returned_usage: Usage,
+        usage_data: Dict[str, Any],
+        reasoning_tokens: Optional[int] = None,
+    ) -> Usage:
+        """
+        Set additional properties on the usage object.
+        """
+        if usage_data["cost"] is not None:
+            returned_usage.cost = usage_data["cost"]
+        if usage_data["is_byok"] is not None:
+            returned_usage.is_byok = usage_data["is_byok"]
+
+        # Set token details
+        if usage_data["completion_tokens_details"] is not None:
+            returned_usage.completion_tokens_details = usage_data[
+                "completion_tokens_details"
+            ]
+
+        # Handle reasoning tokens
+        if reasoning_tokens is not None:
+            if returned_usage.completion_tokens_details is None:
+                returned_usage.completion_tokens_details = (
+                    CompletionTokensDetailsWrapper(reasoning_tokens=reasoning_tokens)
+                )
+            elif (
+                returned_usage.completion_tokens_details is not None
+                and returned_usage.completion_tokens_details.reasoning_tokens is None
+            ):
+                returned_usage.completion_tokens_details.reasoning_tokens = (
+                    reasoning_tokens
+                )
+
+        if usage_data["prompt_tokens_details"] is not None:
+            returned_usage.prompt_tokens_details = usage_data["prompt_tokens_details"]
+
+        return returned_usage
+
+    def calculate_usage(
+        self,
+        chunks: List[Union[Dict[str, Any], ModelResponse]],
+        model: str,
+        completion_output: str,
+        messages: Optional[List] = None,
+        reasoning_tokens: Optional[int] = None,
+    ) -> Usage:
+        """
+        Calculate usage for the given chunks.
+        """
+        returned_usage = Usage()
+        usage_data = self._process_usage_chunks(chunks)
+
         try:
-            returned_usage.prompt_tokens = prompt_tokens or token_counter(
+            returned_usage.prompt_tokens = usage_data["prompt_tokens"] or token_counter(
                 model=model, messages=messages
             )
         except (
@@ -416,25 +455,26 @@ class ChunkProcessor:
         ):  # don't allow this failing to block a complete streaming response from being returned
             print_verbose("token_counter failed, assuming prompt tokens is 0")
             returned_usage.prompt_tokens = 0
-        returned_usage.completion_tokens = completion_tokens or token_counter(
+
+        returned_usage.completion_tokens = usage_data[
+            "completion_tokens"
+        ] or token_counter(
             model=model,
             text=completion_output,
-            count_response_tokens=True,  # count_response_tokens is a Flag to tell token counter this is a response, No need to add extra tokens we do for input messages
+            count_response_tokens=True,
         )
+
         returned_usage.total_tokens = (
             returned_usage.prompt_tokens + returned_usage.completion_tokens
         )
 
-        # Set token details using the helper method
-        self._set_token_details(
-            returned_usage,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-            completion_tokens_details,
-            prompt_tokens_details,
-            reasoning_tokens,
+        returned_usage = self._set_additional_usage_properties(
+            returned_usage, usage_data, reasoning_tokens
+
         )
 
+        # Return a new usage object with the new values
+        returned_usage = Usage(**returned_usage.model_dump())
         return returned_usage
 
 

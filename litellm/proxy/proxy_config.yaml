@@ -1,8 +1,9 @@
 model_list:
+  - model_name: groq/*
+    litellm_params:
+      model: groq/*
+      api_key: bad
   - model_name: openai/*
     litellm_params:
       model: openai/*
 
-
-litellm_settings:
-  disable_token_counter: True

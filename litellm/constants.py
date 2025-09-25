@@ -8,6 +8,12 @@ DEFAULT_S3_FLUSH_INTERVAL_SECONDS = int(
     os.getenv("DEFAULT_S3_FLUSH_INTERVAL_SECONDS", 10)
 )
 DEFAULT_S3_BATCH_SIZE = int(os.getenv("DEFAULT_S3_BATCH_SIZE", 512))
+DEFAULT_SQS_FLUSH_INTERVAL_SECONDS = int(
+    os.getenv("DEFAULT_SQS_FLUSH_INTERVAL_SECONDS", 10)
+)
+DEFAULT_SQS_BATCH_SIZE = int(os.getenv("DEFAULT_SQS_BATCH_SIZE", 512))
+SQS_SEND_MESSAGE_ACTION = "SendMessage"
+SQS_API_VERSION = "2012-11-05"
 DEFAULT_MAX_RETRIES = int(os.getenv("DEFAULT_MAX_RETRIES", 2))
 DEFAULT_MAX_RECURSE_DEPTH = int(os.getenv("DEFAULT_MAX_RECURSE_DEPTH", 100))
 DEFAULT_MAX_RECURSE_DEPTH_SENSITIVE_DATA_MASKER = int(
@@ -36,6 +42,9 @@ SINGLE_DEPLOYMENT_TRAFFIC_FAILURE_THRESHOLD = int(
     os.getenv("SINGLE_DEPLOYMENT_TRAFFIC_FAILURE_THRESHOLD", 1000)
 )  # Minimum number of requests to consider "reasonable traffic". Used for single-deployment cooldown logic.
 
+DEFAULT_REASONING_EFFORT_DISABLE_THINKING_BUDGET = int(
+    os.getenv("DEFAULT_REASONING_EFFORT_DISABLE_THINKING_BUDGET", 0)
+)
 DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET = int(
     os.getenv("DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET", 1024)
 )
@@ -97,6 +106,23 @@ MAX_TILE_WIDTH = int(os.getenv("MAX_TILE_WIDTH", 512))
 MAX_TILE_HEIGHT = int(os.getenv("MAX_TILE_HEIGHT", 512))
 OPENAI_FILE_SEARCH_COST_PER_1K_CALLS = float(
     os.getenv("OPENAI_FILE_SEARCH_COST_PER_1K_CALLS", 2.5 / 1000)
+)
+# Azure OpenAI Assistants feature costs
+# Source: https://azure.microsoft.com/en-us/pricing/details/cognitive-services/openai-service/
+AZURE_FILE_SEARCH_COST_PER_GB_PER_DAY = float(
+    os.getenv("AZURE_FILE_SEARCH_COST_PER_GB_PER_DAY", 0.1)  # $0.1 USD per 1 GB/Day
+)
+AZURE_CODE_INTERPRETER_COST_PER_SESSION = float(
+    os.getenv("AZURE_CODE_INTERPRETER_COST_PER_SESSION", 0.03)  # $0.03 USD per 1 Session
+)
+AZURE_COMPUTER_USE_INPUT_COST_PER_1K_TOKENS = float(
+    os.getenv("AZURE_COMPUTER_USE_INPUT_COST_PER_1K_TOKENS", 3.0)  # $0.003 USD per 1K Tokens
+)
+AZURE_COMPUTER_USE_OUTPUT_COST_PER_1K_TOKENS = float(
+    os.getenv("AZURE_COMPUTER_USE_OUTPUT_COST_PER_1K_TOKENS", 12.0)  # $0.012 USD per 1K Tokens
+)
+AZURE_VECTOR_STORE_COST_PER_GB_PER_DAY = float(
+    os.getenv("AZURE_VECTOR_STORE_COST_PER_GB_PER_DAY", 0.1)  # $0.1 USD per 1 GB/Day (same as file search)
 )
 MIN_NON_ZERO_TEMPERATURE = float(os.getenv("MIN_NON_ZERO_TEMPERATURE", 0.0001))
 #### RELIABILITY ####
@@ -297,6 +323,15 @@ OPENAI_TRANSCRIPTION_PARAMS = [
     "response_format",
     "timestamp_granularities",
 ]
+
+OPENAI_EMBEDDING_PARAMS = ["dimensions", "encoding_format", "user"]
+
+DEFAULT_EMBEDDING_PARAM_VALUES = {
+    **{k: None for k in OPENAI_EMBEDDING_PARAMS},
+    "model": None,
+    "custom_llm_provider": "",
+    "input": None,
+}
 
 DEFAULT_CHAT_COMPLETION_PARAM_VALUES = {
     "functions": None,
@@ -681,6 +716,11 @@ PROMETHEUS_BUDGET_METRICS_REFRESH_INTERVAL_MINUTES = int(
 MCP_TOOL_NAME_PREFIX = "mcp_tool"
 MAXIMUM_TRACEBACK_LINES_TO_LOG = int(os.getenv("MAXIMUM_TRACEBACK_LINES_TO_LOG", 100))
 
+# Headers to control callbacks
+X_LITELLM_DISABLE_CALLBACKS = "x-litellm-disable-callbacks"
+LITELLM_METADATA_FIELD = "litellm_metadata"
+OLD_LITELLM_METADATA_FIELD = "metadata"
+
 ########################### LiteLLM Proxy Specific Constants ###########################
 ########################################################################################
 MAX_SPENDLOG_ROWS_TO_QUERY = int(
@@ -702,6 +742,7 @@ BEDROCK_AGENT_RUNTIME_PASS_THROUGH_ROUTES = [
     "generateQuery/",
     "optimize-prompt/",
 ]
+BASE_MCP_ROUTE = "/mcp"
 
 BATCH_STATUS_POLL_INTERVAL_SECONDS = int(
     os.getenv("BATCH_STATUS_POLL_INTERVAL_SECONDS", 3600)
@@ -722,6 +763,7 @@ DB_SPEND_UPDATE_JOB_NAME = "db_spend_update_job"
 PROMETHEUS_EMIT_BUDGET_METRICS_JOB_NAME = "prometheus_emit_budget_metrics"
 SPEND_LOG_CLEANUP_JOB_NAME = "spend_log_cleanup"
 SPEND_LOG_RUN_LOOPS = int(os.getenv("SPEND_LOG_RUN_LOOPS", 500))
+SPEND_LOG_CLEANUP_BATCH_SIZE = int(os.getenv("SPEND_LOG_CLEANUP_BATCH_SIZE", 1000))
 DEFAULT_CRON_JOB_LOCK_TTL_SECONDS = int(
     os.getenv("DEFAULT_CRON_JOB_LOCK_TTL_SECONDS", 60)
 )  # 1 minute

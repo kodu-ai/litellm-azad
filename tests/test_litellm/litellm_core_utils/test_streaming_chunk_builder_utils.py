@@ -15,7 +15,7 @@ from litellm.types.utils import (
     Delta,
     Function,
     ModelResponseStream,
-    PromptTokensDetails,
+    PromptTokensDetailsWrapper,
     StreamingChoices,
     Usage,
     PromptTokensDetailsWrapper,
@@ -157,7 +157,6 @@ def test_get_combined_tool_content():
         ),
     ]
 
-
 def test_cache_read_input_tokens_retained():
     chunk1 = ModelResponseStream(
         id="chatcmpl-95aabb85-c39f-443d-ae96-0370c404d70c",
@@ -243,3 +242,4 @@ def test_cache_read_input_tokens_retained():
 
     assert usage.cache_creation_input_tokens == 4
     assert usage.cache_read_input_tokens == 11775
+    assert usage.prompt_tokens_details.cached_tokens == 11775
