@@ -23,6 +23,12 @@ def _is_above_128k(tokens: float) -> bool:
     return False
 
 
+def _is_above_200k(tokens: float) -> bool:
+    if tokens > 200000:
+        return True
+    return False
+
+
 def select_cost_metric_for_model(
     model_info: ModelInfo,
 ) -> Literal["cost_per_character", "cost_per_token"]:
@@ -172,10 +178,11 @@ def _get_token_base_cost(
         float, _get_cost_per_unit(model_info, cache_read_cost_key)
     )
 
-    ## CHECK IF ABOVE THRESHOLD
-    threshold: Optional[float] = None
+    Returns:
+        The appropriate cost per token based on whether thresholds are exceeded
+    """
     for key, value in sorted(model_info.items(), reverse=True):
-        if key.startswith("input_cost_per_token_above_") and value is not None:
+        if key.startswith(prefix) and value is not None:
             try:
                 # Handle both formats: _above_128k_tokens and _above_128_tokens
                 threshold_str = key.split("_above_")[1].split("_tokens")[0]
@@ -237,6 +244,7 @@ def _get_token_base_cost(
     )
 
 
+
 def calculate_cost_component(
     model_info: ModelInfo, cost_key: str, usage_value: Optional[float]
 ) -> float:
@@ -260,6 +268,7 @@ def calculate_cost_component(
     ):
         return float(usage_value) * cost_per_unit
     return 0.0
+
 
 
 def _get_cost_per_unit(
@@ -442,6 +451,7 @@ def _parse_completion_tokens_details(usage: Usage) -> CompletionTokensDetailsRes
     )
 
 
+
 def _calculate_input_cost(
     prompt_tokens_details: PromptTokensDetailsResult,
     model_info: ModelInfo,
@@ -458,10 +468,12 @@ def _calculate_input_cost(
     ### CACHE READ COST - Now uses tiered pricing
     prompt_cost += float(prompt_tokens_details["cache_hit_tokens"]) * cache_read_cost
 
+
     ### AUDIO COST
     prompt_cost += calculate_cost_component(
         model_info, "input_cost_per_audio_token", prompt_tokens_details["audio_tokens"]
     )
+
 
     ### CACHE WRITING COST - Now uses tiered pricing
     prompt_cost += calculate_cache_writing_cost(
@@ -472,6 +484,7 @@ def _calculate_input_cost(
         cache_creation_cost_above_1hr=cache_creation_cost_above_1hr,
         cache_creation_cost=cache_creation_cost,
     )
+
 
     ### CHARACTER COST
 

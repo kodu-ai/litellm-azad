@@ -564,12 +564,14 @@ async def acompletion(
         func_with_context = partial(ctx.run, func)
 
         init_response = await loop.run_in_executor(None, func_with_context)
+        
         if isinstance(init_response, dict) or isinstance(
             init_response, ModelResponse
         ):  ## CACHING SCENARIO
             if isinstance(init_response, dict):
                 response = ModelResponse(**init_response)
-            response = init_response
+            else:
+                response = init_response
         elif asyncio.iscoroutine(init_response):
             response = await init_response
         else:
@@ -583,10 +585,12 @@ async def acompletion(
                 response_object=response,
                 model_response_object=litellm.ModelResponse(),
             )
+        
         if isinstance(response, CustomStreamWrapper):
             response.set_logging_event_loop(
                 loop=loop
             )  # sets the logging event loop if the user does sync streaming (e.g. on proxy for sagemaker calls)
+        
         return response
     except Exception as e:
         custom_llm_provider = custom_llm_provider or "openai"
@@ -6074,6 +6078,7 @@ def stream_chunk_builder(  # noqa: PLR0915
     start_time=None,
     end_time=None,
     logging_obj: Optional[Logging] = None,
+    usage: Optional[Usage] = None,
 ) -> Optional[Union[ModelResponse, TextCompletionResponse]]:
     try:
         if chunks is None:
@@ -6188,7 +6193,7 @@ def stream_chunk_builder(  # noqa: PLR0915
 
         reasoning_tokens = processor.count_reasoning_tokens(response)
 
-        usage = processor.calculate_usage(
+        calculated_usage = processor.calculate_usage(
             chunks=chunks,
             model=model,
             completion_output=completion_output,
@@ -6204,6 +6209,19 @@ def stream_chunk_builder(  # noqa: PLR0915
                 usage, "cost", logging_obj._response_cost_calculator(result=response)
             )
 
+        if usage is not None:
+            final_usage = usage
+            if calculated_usage is not None:
+                final_usage.prompt_tokens = calculated_usage.prompt_tokens
+                final_usage.completion_tokens = calculated_usage.completion_tokens
+                final_usage.total_tokens = calculated_usage.total_tokens
+            if hasattr(usage, "cost") and usage.cost is not None:
+                final_usage.cost = usage.cost
+            if hasattr(usage, "is_byok") and usage.is_byok is not None:
+                final_usage.is_byok = usage.is_byok
+            setattr(response, "usage", final_usage)
+        elif calculated_usage is not None:
+            setattr(response, "usage", calculated_usage)
         return response
     except Exception as e:
         verbose_logger.exception(

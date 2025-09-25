@@ -145,6 +145,7 @@ class CustomStreamWrapper:
         )  # keep track of the returned chunks - used for calculating the input/output tokens for stream options
         self.is_function_call = self.check_is_function_call(logging_obj=logging_obj)
         self.created: Optional[int] = None
+        self.final_usage_obj: Optional[Usage] = None
 
     def __iter__(self):
         return self
@@ -718,10 +719,12 @@ class CustomStreamWrapper:
         response_obj: Dict[str, Any],
     ) -> bool:
         if (
-            "content" in completion_obj
-            and (
-                isinstance(completion_obj["content"], str)
-                and len(completion_obj["content"]) > 0
+            (
+                "content" in completion_obj
+                and (
+                    isinstance(completion_obj["content"], str)
+                    and len(completion_obj["content"]) > 0
+                )
             )
             or (
                 "tool_calls" in completion_obj
@@ -736,6 +739,10 @@ class CustomStreamWrapper:
                 "reasoning_content" in model_response.choices[0].delta
                 and model_response.choices[0].delta.reasoning_content is not None
             )
+            or (
+                "thinking_blocks" in model_response.choices[0].delta
+                and model_response.choices[0].delta.thinking_blocks is not None
+            )
             or (model_response.choices[0].delta.provider_specific_fields is not None)
             or (
                 "provider_specific_fields" in model_response
@@ -749,6 +756,7 @@ class CustomStreamWrapper:
                 "annotations" in model_response.choices[0].delta
                 and model_response.choices[0].delta.annotations is not None
             )
+            or response_obj.get("usage") is not None
         ):
             return True
         else:
@@ -922,9 +930,10 @@ class CustomStreamWrapper:
                         completion_obj["role"] = "assistant"
                         self.sent_first_chunk = True
                     if response_obj.get("provider_specific_fields") is not None:
-                        completion_obj["provider_specific_fields"] = response_obj[
-                            "provider_specific_fields"
-                        ]
+                        provider_specific_fields = response_obj["provider_specific_fields"]
+                        completion_obj["provider_specific_fields"] = provider_specific_fields
+                        if "reasoning_content" in provider_specific_fields:
+                            completion_obj["reasoning_content"] = provider_specific_fields["reasoning_content"]
                     model_response.choices[0].delta = Delta(**completion_obj)
                     _index: Optional[int] = completion_obj.get("index")
                     if _index is not None:
@@ -934,6 +943,33 @@ class CustomStreamWrapper:
                     model_response=model_response
                 )
 
+                if response_obj.get("usage") is not None:
+                    if self.final_usage_obj is None:
+                        self.final_usage_obj = response_obj["usage"]
+                    else:
+                        new_usage_dict = (
+                            response_obj["usage"].model_dump()
+                            if hasattr(response_obj["usage"], "model_dump")
+                            else response_obj["usage"]
+                        )
+                        old_usage_dict = (
+                            self.final_usage_obj.model_dump()
+                            if hasattr(self.final_usage_obj, "model_dump")
+                            else self.final_usage_obj
+                        )
+
+                        for k, v in new_usage_dict.items():
+                            if v is not None:
+                                old_usage_dict[k] = v
+
+                        if isinstance(old_usage_dict, dict):
+                            self.final_usage_obj = Usage(**old_usage_dict)
+                        else:
+                            self.final_usage_obj = old_usage_dict
+
+                    model_response.usage = self.final_usage_obj
+
+                print_verbose(f"returning model_response: {model_response}")
                 return model_response
             else:
                 return
@@ -1058,11 +1094,56 @@ class CustomStreamWrapper:
                     ]
 
                 if anthropic_response_obj["usage"] is not None:
-                    setattr(
-                        model_response,
-                        "usage",
-                        litellm.Usage(**anthropic_response_obj["usage"]),
-                    )
+
+                    # Check if this is an anthropic response and use proper usage calculation
+                    if self.custom_llm_provider == "anthropic":
+                        try:
+                            # Import anthropic transformation to use calculate_usage method
+                            from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+                            anthropic_config = AnthropicConfig()
+                            
+                            # Convert usage object to dict if needed
+                            usage_dict = anthropic_response_obj["usage"]
+                            if not isinstance(usage_dict, dict):
+                                # Try different conversion methods for various object types
+                                if hasattr(usage_dict, "model_dump"):
+                                    # Pydantic v2 model
+                                    usage_dict = usage_dict.model_dump()
+                                elif hasattr(usage_dict, "dict"):
+                                    # Pydantic v1 model
+                                    usage_dict = usage_dict.dict()
+                                elif hasattr(usage_dict, "__dict__"):
+                                    # Regular Python object
+                                    usage_dict = vars(usage_dict)
+                                else:
+                                    # Fallback: try to convert to dict or use as-is if it's dict-like
+                                    try:
+                                        usage_dict = dict(usage_dict) if usage_dict else {}
+                                    except (TypeError, ValueError):
+                                        # If conversion fails, log and use fallback
+                                        print_verbose(f"Failed to convert usage object to dict, using fallback: {type(usage_dict)}")
+                                        raise Exception("Usage conversion failed")
+                            
+                            usage_obj = anthropic_config.calculate_usage(
+                                usage_object=usage_dict,
+                                reasoning_content=None  # reasoning_content is handled separately in streaming
+                            )
+                            setattr(model_response, "usage", usage_obj)
+                        except Exception as e:
+                            # Fallback to original behavior if import or conversion fails
+                            print_verbose(f"Anthropic usage calculation failed: {str(e)}, using fallback")
+                            setattr(
+                                model_response,
+                                "usage",
+                                litellm.Usage(**anthropic_response_obj["usage"]),
+                            )
+                    else:
+                        setattr(
+                            model_response,
+                            "usage",
+                            litellm.Usage(**anthropic_response_obj["usage"]),
+                        )
+
 
                 if (
                     "tool_use" in anthropic_response_obj
@@ -1189,6 +1270,64 @@ class CustomStreamWrapper:
                             self.received_finish_reason = chunk.candidates[  # type: ignore
                                 0
                             ].finish_reason.name
+
+                        # Extract usage information if available
+                        if hasattr(chunk, "usageMetadata") and chunk.usageMetadata is not None:
+                            usage_metadata = chunk.usageMetadata
+
+                            cached_tokens = 0
+                            audio_tokens = 0
+                            text_tokens = 0
+                            image_tokens = 0
+
+                            if hasattr(usage_metadata, "cachedContentTokenCount"):
+                                cached_tokens = usage_metadata.cachedContentTokenCount
+
+                            # Extract text, audio, and image tokens from promptTokensDetails if available
+                            if hasattr(usage_metadata, "promptTokensDetails"):
+                                for detail in usage_metadata.promptTokensDetails:
+                                    if hasattr(detail, "modality") and detail.modality == "AUDIO":
+                                        audio_tokens = detail.tokenCount
+                                    elif hasattr(detail, "modality") and detail.modality == "TEXT":
+                                        text_tokens = detail.tokenCount
+                                    elif hasattr(detail, "modality") and detail.modality == "IMAGE":
+                                        image_tokens = detail.tokenCount
+
+                            # Create prompt_tokens_details with all token types
+                            prompt_tokens_details = litellm.types.utils.PromptTokensDetailsWrapper(
+                                cached_tokens=cached_tokens,
+                                audio_tokens=audio_tokens,
+                                text_tokens=text_tokens,
+                                image_tokens=image_tokens
+                            )
+
+                            # Extract response tokens details if available
+                            response_tokens_details = None
+                            if hasattr(usage_metadata, "responseTokensDetails"):
+                                response_tokens_details = litellm.types.utils.CompletionTokensDetailsWrapper()
+                                for detail in usage_metadata.responseTokensDetails:
+                                    if detail.modality == "TEXT":
+                                        response_tokens_details.text_tokens = detail.tokenCount
+                                    elif detail.modality == "AUDIO":
+                                        response_tokens_details.audio_tokens = detail.tokenCount
+
+                            # Extract reasoning tokens if available
+                            reasoning_tokens = None
+                            if hasattr(usage_metadata, "thoughtsTokenCount"):
+                                reasoning_tokens = usage_metadata.thoughtsTokenCount
+
+                            setattr(
+                                model_response,
+                                "usage",
+                                litellm.Usage(
+                                    prompt_tokens=getattr(usage_metadata, "promptTokenCount", 0),
+                                    completion_tokens=getattr(usage_metadata, "candidatesTokenCount", 0),
+                                    total_tokens=getattr(usage_metadata, "totalTokenCount", 0),
+                                    prompt_tokens_details=prompt_tokens_details,
+                                    completion_tokens_details=response_tokens_details,
+                                    reasoning_tokens=reasoning_tokens
+                                ),
+                            )
                     except Exception:
                         if chunk.candidates[0].finish_reason.name == "SAFETY":  # type: ignore
                             raise Exception(
@@ -1240,6 +1379,7 @@ class CustomStreamWrapper:
                             total_tokens=response_obj["usage"].total_tokens,
                         ),
                     )
+
             elif self.custom_llm_provider == "text-completion-codestral":
                 if not isinstance(chunk, str):
                     raise ValueError(f"chunk is not a string: {chunk}")
@@ -1292,6 +1432,8 @@ class CustomStreamWrapper:
                     self.system_fingerprint = chunk.system_fingerprint
                 if response_obj["is_finished"]:
                     self.received_finish_reason = response_obj["finish_reason"]
+                if hasattr(chunk, "usage") and chunk.usage is not None:
+                    setattr(model_response, "usage", chunk.usage)
             else:  # openai / azure chat model
                 if self.custom_llm_provider == "azure":
                     if isinstance(chunk, BaseModel) and hasattr(chunk, "model"):
@@ -1329,23 +1471,12 @@ class CustomStreamWrapper:
 
                 if response_obj["usage"] is not None:
                     if isinstance(response_obj["usage"], dict):
+                        # Pass all fields from the usage dictionary to the Usage object
+                        # This ensures fields like 'cost' from OpenRouter are preserved
                         setattr(
                             model_response,
                             "usage",
-                            litellm.Usage(
-                                prompt_tokens=response_obj["usage"].get(
-                                    "prompt_tokens", None
-                                )
-                                or None,
-                                completion_tokens=response_obj["usage"].get(
-                                    "completion_tokens", None
-                                )
-                                or None,
-                                total_tokens=response_obj["usage"].get(
-                                    "total_tokens", None
-                                )
-                                or None,
-                            ),
+                            litellm.Usage(**response_obj["usage"]),
                         )
                     elif isinstance(response_obj["usage"], Usage):
                         setattr(
@@ -1603,6 +1734,7 @@ class CustomStreamWrapper:
                     chunk = self.completion_stream
                 else:
                     chunk = next(self.completion_stream)
+                
                 if chunk is not None and chunk != b"":
                     print_verbose(
                         f"PROCESSED CHUNK PRE CHUNK CREATOR: {chunk}; custom_llm_provider: {self.custom_llm_provider}"
@@ -1635,8 +1767,8 @@ class CustomStreamWrapper:
                     )
                     # HANDLE STREAM OPTIONS
                     self.chunks.append(response)
-                    if hasattr(
-                        response, "usage"
+                    if (
+                        hasattr(response, "usage") and not self.send_stream_usage
                     ):  # remove usage from chunk, only send on final chunk
                         # Convert the object to a dictionary
                         obj_dict = response.dict()
@@ -1658,17 +1790,20 @@ class CustomStreamWrapper:
                             continue
                     # add usage as hidden param
                     if self.sent_last_chunk is True and self.stream_options is None:
-                        usage = calculate_total_usage(chunks=self.chunks)
-                        response._hidden_params["usage"] = usage
+                        response._hidden_params["usage"] = self.final_usage_obj
                     # RETURN RESULT
                     return response
+                else:
+                    pass
 
         except StopIteration:
             if self.sent_last_chunk is True:
+                usage_to_use = self.final_usage_obj
                 complete_streaming_response = litellm.stream_chunk_builder(
                     chunks=self.chunks,
                     messages=self.messages,
                     logging_obj=self.logging_obj,
+                    usage=usage_to_use,
                 )
 
                 response = self.model_response_creator()
@@ -1707,8 +1842,10 @@ class CustomStreamWrapper:
                 self.sent_last_chunk = True
                 processed_chunk = self.finish_reason_handler()
                 if self.stream_options is None:  # add usage as hidden param
-                    usage = calculate_total_usage(chunks=self.chunks)
-                    processed_chunk._hidden_params["usage"] = usage
+                    if self.final_usage_obj is not None:
+                        processed_chunk._hidden_params["usage"] = self.final_usage_obj
+                    else:
+                        processed_chunk._hidden_params["usage"] = None
                 ## LOGGING
                 executor.submit(
                     self.run_success_logging_and_cache_storage,
@@ -1800,8 +1937,8 @@ class CustomStreamWrapper:
                         input=self.response_uptil_now, model=self.model
                     )
                     self.chunks.append(processed_chunk)
-                    if hasattr(
-                        processed_chunk, "usage"
+                    if (
+                        hasattr(processed_chunk, "usage") and not self.send_stream_usage
                     ):  # remove usage from chunk, only send on final chunk
                         # Convert the object to a dictionary
                         obj_dict = processed_chunk.dict()
@@ -1818,6 +1955,8 @@ class CustomStreamWrapper:
 
                         if is_empty:
                             continue
+                        cache_hit = processed_chunk.get("cached_content_token_count", 0) > 0
+
                     print_verbose(f"final returned processed chunk: {processed_chunk}")
 
                     # add usage as hidden param
@@ -1862,10 +2001,12 @@ class CustomStreamWrapper:
         except (StopAsyncIteration, StopIteration):
             if self.sent_last_chunk is True:
                 # log the final chunk with accurate streaming values
+                usage_to_use = self.final_usage_obj
                 complete_streaming_response = litellm.stream_chunk_builder(
                     chunks=self.chunks,
                     messages=self.messages,
                     logging_obj=self.logging_obj,
+                    usage=usage_to_use,
                 )
 
                 response = self.model_response_creator()
@@ -1995,25 +2136,6 @@ class CustomStreamWrapper:
 
         return chunk
 
-
-def calculate_total_usage(chunks: List[ModelResponse]) -> Usage:
-    """Assume most recent usage chunk has total usage uptil then."""
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    for chunk in chunks:
-        if "usage" in chunk:
-            if "prompt_tokens" in chunk["usage"]:
-                prompt_tokens = chunk["usage"].get("prompt_tokens", 0) or 0
-            if "completion_tokens" in chunk["usage"]:
-                completion_tokens = chunk["usage"].get("completion_tokens", 0) or 0
-
-    returned_usage_chunk = Usage(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-    )
-
-    return returned_usage_chunk
 
 
 def generic_chunk_has_all_required_fields(chunk: dict) -> bool:

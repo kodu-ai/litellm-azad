@@ -4,9 +4,13 @@ Cerebras Chat Completions API
 this is OpenAI compatible - no translation needed / occurs
 """
 
-from typing import Optional
+from typing import Any, Coroutine, List, Optional, Union
 
+from litellm.litellm_core_utils.prompt_templates.common_utils import (
+    handle_messages_with_content_list_to_str_conversion,
+)
 from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
+from litellm.types.llms.openai import AllMessageValues
 
 
 class CerebrasConfig(OpenAIGPTConfig):
@@ -81,3 +85,21 @@ class CerebrasConfig(OpenAIGPTConfig):
             elif param in supported_openai_params:
                 optional_params[param] = value
         return optional_params
+
+    def _transform_messages(
+        self, messages: List[AllMessageValues], model: str, is_async: bool = False
+    ) -> Union[List[AllMessageValues], Coroutine[Any, Any, List[AllMessageValues]]]:
+        """
+        Handles messages with content list conversion for Cerebras.
+        
+        Motivation: Cerebras API doesn't support content as a list like OpenAI's newer format.
+        It expects simple string content, not arrays like [{type: "text", text: "..."}].
+        """
+        # Convert content arrays to strings using the same utility as Mistral
+        messages = handle_messages_with_content_list_to_str_conversion(messages)
+        
+        # Call parent transformation for any other OpenAI-specific handling
+        if is_async:
+            return super()._transform_messages(messages, model, True)
+        else:
+            return super()._transform_messages(messages, model, False)

@@ -490,6 +490,13 @@ class ModelResponseIterator:
         self.content_blocks: List[ContentBlockDelta] = []
         self.tool_index = -1
         self.json_mode = json_mode
+        # Track accumulated usage to merge chunks intelligently
+        self.accumulated_usage: Optional[Dict[str, Any]] = None
+        # Track accumulated reasoning content for final usage calculation
+        self.accumulated_reasoning_content: Optional[str] = None
+        # Track the current server tool call details for proper accumulation
+        self.current_server_tool_id: Optional[str] = None
+        self.current_server_tool_name: Optional[str] = None
 
         # Track if we're currently streaming a response_format tool
         self.is_response_format_tool: bool = False
@@ -519,10 +526,99 @@ class ModelResponseIterator:
             return True
         return False
 
-    def _handle_usage(self, anthropic_usage_chunk: Union[dict, UsageDelta]) -> Usage:
-        return AnthropicConfig().calculate_usage(
-            usage_object=cast(dict, anthropic_usage_chunk), reasoning_content=None
+    def _merge_usage_data(self, new_usage_chunk: Union[dict, UsageDelta]) -> Usage:
+        """
+        Intelligently merge usage data from multiple chunks.
+        
+        Strategy:
+        - Preserve cache tokens from complete chunks
+        - Use latest output tokens (final completion count)
+        - Use latest input tokens if provided
+        - Use accumulated reasoning content for reasoning token calculation
+        """
+        # Convert to dict for easier handling
+        new_usage_dict = new_usage_chunk
+        if not isinstance(new_usage_dict, dict):
+            if hasattr(new_usage_dict, "model_dump"):
+                new_usage_dict = new_usage_dict.model_dump()
+            elif hasattr(new_usage_dict, "dict"):
+                new_usage_dict = new_usage_dict.dict()
+            elif hasattr(new_usage_dict, "__dict__"):
+                new_usage_dict = vars(new_usage_dict)
+        
+        # Initialize accumulated usage if first chunk
+        if self.accumulated_usage is None:
+            self.accumulated_usage = {}
+        
+        # Merge strategy:
+        # 1. Cache tokens: preserve first non-zero values (don't overwrite with 0)
+        # 2. Input tokens: use latest non-zero value
+        # 3. Output tokens: use latest value (completion updates)
+        
+        # Cache creation tokens - preserve first non-zero
+        if new_usage_dict.get("cache_creation_input_tokens", 0) > 0:
+            self.accumulated_usage["cache_creation_input_tokens"] = new_usage_dict["cache_creation_input_tokens"]
+        elif "cache_creation_input_tokens" not in self.accumulated_usage:
+            self.accumulated_usage["cache_creation_input_tokens"] = 0
+            
+        # Cache read tokens - preserve first non-zero
+        if new_usage_dict.get("cache_read_input_tokens", 0) > 0:
+            self.accumulated_usage["cache_read_input_tokens"] = new_usage_dict["cache_read_input_tokens"]
+        elif "cache_read_input_tokens" not in self.accumulated_usage:
+            self.accumulated_usage["cache_read_input_tokens"] = 0
+        
+        # Input tokens - use latest non-zero (or update if provided)
+        if new_usage_dict.get("input_tokens", 0) > 0:
+            self.accumulated_usage["input_tokens"] = new_usage_dict["input_tokens"]
+        elif "input_tokens" not in self.accumulated_usage:
+            self.accumulated_usage["input_tokens"] = 0
+        
+        # Output tokens - always use latest (completion is progressive)
+        if "output_tokens" in new_usage_dict:
+            self.accumulated_usage["output_tokens"] = new_usage_dict["output_tokens"]
+        elif "output_tokens" not in self.accumulated_usage:
+            self.accumulated_usage["output_tokens"] = 0
+        
+        # Other fields - use latest if provided
+        for field in ["service_tier"]:
+            if field in new_usage_dict:
+                self.accumulated_usage[field] = new_usage_dict[field]
+        
+        # Create Usage object from accumulated data with reasoning content
+        usage_result = AnthropicConfig().calculate_usage(
+            usage_object=self.accumulated_usage, 
+            reasoning_content=self.accumulated_reasoning_content
         )
+        
+        return usage_result
+
+    def _handle_usage(self, anthropic_usage_chunk: Union[dict, UsageDelta]) -> Usage:
+        # Use the new merge-based approach instead of simple conversion
+        return self._merge_usage_data(anthropic_usage_chunk)
+
+    def _has_complete_usage(self, usage_chunk: Union[dict, UsageDelta]) -> bool:
+        """
+        Check if the usage chunk contains any usage information worth processing.
+        
+        Since we now merge usage data intelligently, we process ANY chunk that
+        has usage information rather than trying to determine "completeness".
+        """
+        if isinstance(usage_chunk, dict):
+            has_input_tokens = usage_chunk.get("input_tokens", 0) > 0
+            has_cache_read_tokens = usage_chunk.get("cache_read_input_tokens", 0) > 0
+            has_cache_creation_tokens = usage_chunk.get("cache_creation_input_tokens", 0) > 0
+            has_output_tokens = usage_chunk.get("output_tokens", 0) > 0
+            
+            # Process any chunk that has ANY usage information
+            return has_input_tokens or has_cache_read_tokens or has_cache_creation_tokens or has_output_tokens
+        else:
+            # For object-like usage chunks
+            has_input_tokens = getattr(usage_chunk, "input_tokens", 0) > 0
+            has_cache_read_tokens = getattr(usage_chunk, "cache_read_input_tokens", 0) > 0  
+            has_cache_creation_tokens = getattr(usage_chunk, "cache_creation_input_tokens", 0) > 0
+            has_output_tokens = getattr(usage_chunk, "output_tokens", 0) > 0
+            
+            return has_input_tokens or has_cache_read_tokens or has_cache_creation_tokens or has_output_tokens
 
     def _content_block_delta_helper(
         self, chunk: dict
@@ -547,15 +643,26 @@ class ModelResponseIterator:
         if "text" in content_block["delta"]:
             text = content_block["delta"]["text"]
         elif "partial_json" in content_block["delta"]:
-            tool_use = {
-                "id": None,
-                "type": "function",
-                "function": {
-                    "name": None,
-                    "arguments": content_block["delta"]["partial_json"],
-                },
-                "index": self.tool_index,
-            }
+            if self.current_server_tool_id:
+                tool_use = {
+                    "id": self.current_server_tool_id,
+                    "type": "function",
+                    "function": {
+                        "name": self.current_server_tool_name,
+                        "arguments": content_block["delta"]["partial_json"],
+                    },
+                    "index": self.tool_index,
+                }
+            else:
+                tool_use = {
+                    "id": None,
+                    "type": "function",
+                    "function": {
+                        "name": None,
+                        "arguments": content_block["delta"]["partial_json"],
+                    },
+                    "index": self.tool_index,
+                }
         elif "citation" in content_block["delta"]:
             provider_specific_fields["citation"] = content_block["delta"]["citation"]
         elif (
@@ -657,6 +764,11 @@ class ModelResponseIterator:
                     reasoning_content = self._handle_reasoning_content(
                         thinking_blocks=thinking_blocks
                     )
+                    # Accumulate reasoning content for final usage calculation
+                    if reasoning_content:
+                        if self.accumulated_reasoning_content is None:
+                            self.accumulated_reasoning_content = ""
+                        self.accumulated_reasoning_content += reasoning_content
             elif type_chunk == "content_block_start":
                 """
                 event: content_block_start
@@ -678,6 +790,27 @@ class ModelResponseIterator:
                         },
                         "index": self.tool_index,
                     }
+                elif content_block_start["content_block"]["type"] == "server_tool_use":
+                    content_block = content_block_start["content_block"]
+                    provider_specific_fields["server_tool_use"] = content_block
+                    
+                    self.current_server_tool_id = content_block.get("id")
+                    self.current_server_tool_name = content_block.get("name")
+                    
+                    self.tool_index += 1
+                    tool_use = {
+                        "id": content_block.get("id"),
+                        "type": "function",
+                        "function": {
+                            "name": content_block.get("name"),
+                            "arguments": "",  # Empty for server tool use - arguments will be streamed
+                        },
+                        "index": self.tool_index,
+                    }
+                elif content_block_start["content_block"]["type"] == "web_search_tool_result":
+                    # Handle web search tool result in content block start
+                    content_block = content_block_start["content_block"]
+                    provider_specific_fields["web_search_tool_result"] = content_block
                 elif (
                     content_block_start["content_block"]["type"] == "redacted_thinking"
                 ):
@@ -690,6 +823,10 @@ class ModelResponseIterator:
                     )
             elif type_chunk == "content_block_stop":
                 ContentBlockStop(**chunk)  # type: ignore
+                # Clear server tool use tracking when content block stops
+                self.current_server_tool_id = None
+                self.current_server_tool_name = None
+                
                 # check if tool call content block
                 is_empty = self.check_empty_tool_call_args()
                 if is_empty:
@@ -706,6 +843,7 @@ class ModelResponseIterator:
                 self.is_response_format_tool = False
             elif type_chunk == "message_delta":
                 finish_reason, usage = self._handle_message_delta(chunk)
+
             elif type_chunk == "message_start":
                 """
                 Anthropic
@@ -728,9 +866,10 @@ class ModelResponseIterator:
                 """
                 message_start_block = MessageStartBlock(**chunk)  # type: ignore
                 if "usage" in message_start_block["message"]:
-                    usage = self._handle_usage(
-                        anthropic_usage_chunk=message_start_block["message"]["usage"]
-                    )
+                    usage_chunk = message_start_block["message"]["usage"]
+                    if self._has_complete_usage(usage_chunk):
+                        usage = self._handle_usage(anthropic_usage_chunk=usage_chunk)
+                        
             elif type_chunk == "error":
                 """
                 {"type":"error","error":{"details":null,"type":"api_error","message":"Internal server error"}      }
