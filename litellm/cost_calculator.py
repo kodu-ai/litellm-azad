@@ -29,8 +29,8 @@ from litellm.llms.anthropic.cost_calculation import (
 from litellm.llms.azure.cost_calculation import (
     cost_per_token as azure_openai_cost_per_token,
 )
-from litellm.llms.bedrock.image.cost_calculator import (
-    cost_calculator as bedrock_image_cost_calculator,
+from litellm.llms.bedrock.cost_calculation import (
+    cost_per_token as bedrock_cost_per_token,
 )
 from litellm.llms.databricks.cost_calculator import (
     cost_per_token as databricks_cost_per_token,
@@ -57,9 +57,7 @@ from litellm.llms.vertex_ai.cost_calculator import (
     cost_per_token as google_cost_per_token,
 )
 from litellm.llms.vertex_ai.cost_calculator import cost_router as google_cost_router
-from litellm.llms.vertex_ai.image_generation.cost_calculator import (
-    cost_calculator as vertex_ai_image_cost_calculator,
-)
+from litellm.llms.xai.cost_calculator import cost_per_token as xai_cost_per_token
 from litellm.responses.utils import ResponseAPILoggingUtils
 from litellm.types.llms.openai import (
     HttpxBinaryResponseContent,
@@ -95,7 +93,11 @@ from litellm.utils import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from litellm.litellm_core_utils.litellm_logging import (
+        Logging as LitellmLoggingObject,
+    )
+else:
+    LitellmLoggingObject = Any
 
 
 def _cost_per_token_custom_pricing_helper(
@@ -146,6 +148,8 @@ def cost_per_token(  # noqa: PLR0915
     ### CALL TYPE ###
     call_type: CallTypesLiteral = "completion",
     audio_transcription_file_duration: float = 0.0,  # for audio transcription calls - the file time in seconds
+    ### SERVICE TIER ###
+    service_tier: Optional[str] = None,  # for OpenAI service tier pricing
 ) -> Tuple[float, float]:  # type: ignore
     """
     Calculates the cost per token for a given model, prompt tokens, and completion tokens.
@@ -276,6 +280,7 @@ def cost_per_token(  # noqa: PLR0915
                 model=model_without_prefix,
                 usage=usage_block,
                 custom_llm_provider=custom_llm_provider,
+                service_tier=service_tier,
             )
 
         return prompt_cost, completion_cost
@@ -322,8 +327,10 @@ def cost_per_token(  # noqa: PLR0915
             )
     elif custom_llm_provider == "anthropic":
         return anthropic_cost_per_token(model=model, usage=usage_block)
+    elif custom_llm_provider == "bedrock":
+        return bedrock_cost_per_token(model=model, usage=usage_block)
     elif custom_llm_provider == "openai":
-        return openai_cost_per_token(model=model, usage=usage_block)
+        return openai_cost_per_token(model=model, usage=usage_block, service_tier=service_tier)
     elif custom_llm_provider == "databricks":
         return databricks_cost_per_token(model=model, usage=usage_block)
     elif custom_llm_provider == "fireworks_ai":
@@ -338,6 +345,13 @@ def cost_per_token(  # noqa: PLR0915
         return deepseek_cost_per_token(model=model, usage=usage_block)
     elif custom_llm_provider == "perplexity":
         return perplexity_cost_per_token(model=model, usage=usage_block)
+    elif custom_llm_provider == "xai":
+        return xai_cost_per_token(model=model, usage=usage_block)
+    elif custom_llm_provider == "dashscope":
+        from litellm.llms.dashscope.cost_calculator import (
+            cost_per_token as dashscope_cost_per_token,
+        )
+        return dashscope_cost_per_token(model=model, usage=usage_block)
     else:
         model_info = _cached_get_model_info_helper(
             model=model, custom_llm_provider=custom_llm_provider
@@ -594,6 +608,9 @@ def completion_cost(  # noqa: PLR0915
     standard_built_in_tools_params: Optional[StandardBuiltInToolsParams] = None,
     litellm_model_name: Optional[str] = None,
     router_model_id: Optional[str] = None,
+    litellm_logging_obj: Optional[LitellmLoggingObject] = None,
+    ### SERVICE TIER ###
+    service_tier: Optional[str] = None,  # for OpenAI service tier pricing
 ) -> float:
     """
     Calculate the cost of a given completion call fot GPT-3.5-turbo, llama2, any litellm supported llm.
@@ -646,6 +663,10 @@ def completion_cost(  # noqa: PLR0915
             completion_response=completion_response
         )
         rerank_billed_units: Optional[RerankBilledUnits] = None
+        
+        # Extract service_tier from optional_params if not provided directly
+        if service_tier is None and optional_params is not None:
+            service_tier = optional_params.get("service_tier")
 
         selected_model = _select_model_name_for_cost_calc(
             model=model,
@@ -671,9 +692,9 @@ def completion_cost(  # noqa: PLR0915
                     or isinstance(completion_response, dict)
                 ):  # tts returns a custom class
                     if isinstance(completion_response, dict):
-                        usage_obj: Optional[Union[dict, Usage]] = (
-                            completion_response.get("usage", {})
-                        )
+                        usage_obj: Optional[
+                            Union[dict, Usage]
+                        ] = completion_response.get("usage", {})
                     else:
                         usage_obj = getattr(completion_response, "usage", {})
                     if isinstance(usage_obj, BaseModel) and not _is_known_usage_objects(
@@ -758,32 +779,15 @@ def completion_cost(  # noqa: PLR0915
                         )
                 if CostCalculatorUtils._call_type_has_image_response(call_type):
                     ### IMAGE GENERATION COST CALCULATION ###
-                    if custom_llm_provider == "vertex_ai":
-                        if isinstance(completion_response, ImageResponse):
-                            return vertex_ai_image_cost_calculator(
-                                model=model,
-                                image_response=completion_response,
-                            )
-                    elif custom_llm_provider == "bedrock":
-                        if isinstance(completion_response, ImageResponse):
-                            return bedrock_image_cost_calculator(
-                                model=model,
-                                size=size,
-                                image_response=completion_response,
-                                optional_params=optional_params,
-                            )
-                        raise TypeError(
-                            "completion_response must be of type ImageResponse for bedrock image cost calculation"
-                        )
-                    else:
-                        return default_image_cost_calculator(
-                            model=model,
-                            quality=quality,
-                            custom_llm_provider=custom_llm_provider,
-                            n=n,
-                            size=size,
-                            optional_params=optional_params,
-                        )
+                    return CostCalculatorUtils.route_image_generation_cost_calculator(
+                        model=model,
+                        custom_llm_provider=custom_llm_provider,
+                        completion_response=completion_response,
+                        quality=quality,
+                        n=n,
+                        size=size,
+                        optional_params=optional_params,
+                    )
                 elif (
                     call_type == CallTypes.speech.value
                     or call_type == CallTypes.aspeech.value
@@ -836,6 +840,14 @@ def completion_cost(  # noqa: PLR0915
                         combined_usage_object=cost_per_token_usage_object,
                         custom_llm_provider=custom_llm_provider,
                         litellm_model_name=model,
+                    )
+                elif call_type == CallTypes.call_mcp_tool.value:
+                    from litellm.proxy._experimental.mcp_server.cost_calculator import (
+                        MCPCostCalculator,
+                    )
+
+                    return MCPCostCalculator.calculate_mcp_tool_call_cost(
+                        litellm_logging_obj=litellm_logging_obj
                     )
                 # Calculate cost based on prompt_tokens, completion_tokens
                 if (
@@ -906,6 +918,7 @@ def completion_cost(  # noqa: PLR0915
                     call_type=cast(CallTypesLiteral, call_type),
                     audio_transcription_file_duration=audio_transcription_file_duration,
                     rerank_billed_units=rerank_billed_units,
+                    service_tier=service_tier,
                 )
                 _final_cost = (
                     prompt_tokens_cost_usd_dollar + completion_tokens_cost_usd_dollar
@@ -999,6 +1012,9 @@ def response_cost_calculator(
     standard_built_in_tools_params: Optional[StandardBuiltInToolsParams] = None,
     litellm_model_name: Optional[str] = None,
     router_model_id: Optional[str] = None,
+    litellm_logging_obj: Optional[LitellmLoggingObject] = None,
+    ### SERVICE TIER ###
+    service_tier: Optional[str] = None,  # for OpenAI service tier pricing
 ) -> float:
     """
     Returns
@@ -1031,6 +1047,8 @@ def response_cost_calculator(
                 standard_built_in_tools_params=standard_built_in_tools_params,
                 litellm_model_name=litellm_model_name,
                 router_model_id=router_model_id,
+                litellm_logging_obj=litellm_logging_obj,
+                service_tier=service_tier,
             )
         return response_cost
     except Exception as e:
@@ -1287,7 +1305,7 @@ class BaseTokenUsageProcessor:
                     )
 
                 # Check what keys exist in the model's completion_tokens_details
-                for attr in dir(usage.completion_tokens_details):
+                for attr in usage.completion_tokens_details.model_fields:
                     if not attr.startswith("_") and not callable(
                         getattr(usage.completion_tokens_details, attr)
                     ):
@@ -1295,7 +1313,8 @@ class BaseTokenUsageProcessor:
                             combined.completion_tokens_details, attr, 0
                         )
                         new_val = getattr(usage.completion_tokens_details, attr, 0)
-                        if new_val is not None:
+
+                        if new_val is not None and current_val is not None:
                             setattr(
                                 combined.completion_tokens_details,
                                 attr,

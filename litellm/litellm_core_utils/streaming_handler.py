@@ -13,6 +13,9 @@ from pydantic import BaseModel
 
 import litellm
 from litellm import verbose_logger
+from litellm.litellm_core_utils.model_response_utils import (
+    is_model_response_stream_empty,
+)
 from litellm.litellm_core_utils.redact_messages import LiteLLMLoggingObject
 from litellm.litellm_core_utils.thread_pool_executor import executor
 from litellm.types.llms.openai import ChatCompletionChunk
@@ -31,6 +34,12 @@ from .core_helpers import map_finish_reason, process_response_headers
 from .exception_mapping_utils import exception_type
 from .llm_response_utils.get_api_base import get_api_base
 from .rules import Rules
+
+# Constants for special delta attribute names
+AUDIO_ATTRIBUTE = "audio"
+IMAGE_ATTRIBUTE = "images"
+TOOL_CALLS_ATTRIBUTE = "tool_calls"
+FUNCTION_CALL_ATTRIBUTE = "function_call"
 
 
 def is_async_iterable(obj: Any) -> bool:
@@ -621,7 +630,6 @@ class CustomStreamWrapper:
 
         args = {
             "model": _model,
-            "stream_options": self.stream_options,
             **chunk_dict,
         }
 
@@ -754,18 +762,118 @@ class CustomStreamWrapper:
         else:
             return False
 
+    def strip_role_from_delta(
+        self, model_response: ModelResponseStream
+    ) -> ModelResponseStream:
+        """
+        Strip the role from the delta.
+        """
+        if self.sent_first_chunk is False:
+            model_response.choices[0].delta["role"] = "assistant"
+            self.sent_first_chunk = True
+        elif self.sent_first_chunk is True and hasattr(
+            model_response.choices[0].delta, "role"
+        ):
+            _initial_delta = model_response.choices[0].delta.model_dump()
+
+            _initial_delta.pop("role", None)
+            model_response.choices[0].delta = Delta(**_initial_delta)
+        return model_response
+
+    def _has_special_delta_content(self, model_response: ModelResponseStream) -> bool:
+        """
+        Check if the delta contains special content types (tool_calls, function_call, audio, or image).
+        """
+        if len(model_response.choices) == 0:
+            return False
+
+        delta = model_response.choices[0].delta
+
+        # Check for tool_calls or function_call
+        if (
+            getattr(delta, TOOL_CALLS_ATTRIBUTE, None) is not None
+            or getattr(delta, FUNCTION_CALL_ATTRIBUTE, None) is not None
+        ):
+            return True
+
+        # Check for audio
+        if (
+            hasattr(delta, AUDIO_ATTRIBUTE)
+            and getattr(delta, AUDIO_ATTRIBUTE, None) is not None
+        ):
+            return True
+
+        # Check for image
+        if (
+            hasattr(delta, IMAGE_ATTRIBUTE)
+            and getattr(delta, IMAGE_ATTRIBUTE, None) is not None
+        ):
+            return True
+
+        return False
+
+    def _handle_special_delta_content(
+        self, model_response: ModelResponseStream
+    ) -> ModelResponseStream:
+        """
+        Handle special delta content types by stripping role and returning the response.
+        """
+        return self.strip_role_from_delta(model_response)
+
+    def _has_special_delta_attribute(self, delta, attribute_name: str) -> bool:
+        """
+        Check if delta has a specific attribute and it's not None.
+        """
+        return delta is not None and getattr(delta, attribute_name, None) is not None
+
+    def _copy_delta_attribute(
+        self, source_delta, target_delta, attribute_name: str
+    ) -> None:
+        """
+        Copy a specific attribute from source delta to target delta.
+        """
+        setattr(target_delta, attribute_name, getattr(source_delta, attribute_name))
+
+    def _has_any_special_delta_attributes(self, delta) -> bool:
+        """
+        Check if delta has any special attributes (audio, image).
+        """
+        special_attributes = [AUDIO_ATTRIBUTE, IMAGE_ATTRIBUTE]
+        for attribute in special_attributes:
+            if self._has_special_delta_attribute(delta, attribute):
+                return True
+        return False
+
+    def _handle_special_delta_attributes(
+        self, delta, model_response: "ModelResponseStream"
+    ) -> None:
+        """
+        Handle special delta attributes (audio, image) by copying them to model_response.
+        """
+        special_attributes = [AUDIO_ATTRIBUTE, IMAGE_ATTRIBUTE]
+        for attribute in special_attributes:
+            if self._has_special_delta_attribute(delta, attribute):
+                self._copy_delta_attribute(
+                    delta, model_response.choices[0].delta, attribute
+                )
+
     def return_processed_chunk_logic(  # noqa
         self,
         completion_obj: Dict[str, Any],
         model_response: ModelResponseStream,
         response_obj: Dict[str, Any],
     ):
+        from litellm.litellm_core_utils.core_helpers import (
+            preserve_upstream_non_openai_attributes,
+        )
+
         print_verbose(
             f"completion_obj: {completion_obj}, model_response.choices[0]: {model_response.choices[0]}, response_obj: {response_obj}"
         )
         is_chunk_non_empty = self.is_chunk_non_empty(
             completion_obj, model_response, response_obj
         )
+
         if (
             is_chunk_non_empty
         ):  # cannot set content of an OpenAI Object to be an empty string
@@ -774,11 +882,12 @@ class CustomStreamWrapper:
                 chunk=completion_obj["content"],
                 finish_reason=model_response.choices[0].finish_reason,
             )  # filter out bos/eos tokens from openai-compatible hf endpoints
-            print_verbose(f"hold - {hold}, model_response_str - {model_response_str}")
+
             if hold is False:
                 ## check if openai/azure chunk
                 original_chunk = response_obj.get("original_chunk", None)
                 if original_chunk:
+
                     if len(original_chunk.choices) > 0:
                         choices = []
                         for choice in original_chunk.choices:
@@ -795,6 +904,7 @@ class CustomStreamWrapper:
                         print_verbose(f"choices in streaming: {choices}")
                         setattr(model_response, "choices", choices)
                     else:
+
                         return
                     model_response.system_fingerprint = (
                         original_chunk.system_fingerprint
@@ -804,19 +914,14 @@ class CustomStreamWrapper:
                         "citations",
                         getattr(original_chunk, "citations", None),
                     )
-                    print_verbose(f"self.sent_first_chunk: {self.sent_first_chunk}")
-                    if self.sent_first_chunk is False:
-                        model_response.choices[0].delta["role"] = "assistant"
-                        self.sent_first_chunk = True
-                    elif self.sent_first_chunk is True and hasattr(
-                        model_response.choices[0].delta, "role"
-                    ):
-                        _initial_delta = model_response.choices[0].delta.model_dump()
+                    preserve_upstream_non_openai_attributes(
+                        model_response=model_response,
+                        original_chunk=original_chunk,
+                    )
 
-                        _initial_delta.pop("role", None)
-                        model_response.choices[0].delta = Delta(**_initial_delta)
+                    model_response = self.strip_role_from_delta(model_response)
                     verbose_logger.debug(
-                        f"model_response.choices[0].delta: {model_response.choices[0].delta}"
+                        f"model_response.choices[0].delta inside is_chunk_non_empty: {model_response.choices[0].delta}"
                     )
                 else:
                     ## else
@@ -902,20 +1007,8 @@ class CustomStreamWrapper:
                 self.sent_last_chunk = True
 
             return model_response
-        elif (
-            model_response.choices[0].delta.tool_calls is not None
-            or model_response.choices[0].delta.function_call is not None
-        ):
-            if self.sent_first_chunk is False:
-                model_response.choices[0].delta["role"] = "assistant"
-                self.sent_first_chunk = True
-            return model_response
-        elif (
-            len(model_response.choices) > 0
-            and hasattr(model_response.choices[0].delta, "audio")
-            and model_response.choices[0].delta.audio is not None
-        ):
-            return model_response
+        elif self._has_special_delta_content(model_response):
+            return self._handle_special_delta_content(model_response)
         else:
             if hasattr(model_response, "usage"):
                 self.chunks.append(model_response)
@@ -939,6 +1032,9 @@ class CustomStreamWrapper:
             )
             if reasoning_content:
                 if self.sent_first_thinking_block is False:
+                    # Ensure content is not None before concatenation
+                    if model_response.choices[0].delta.content is None:
+                        model_response.choices[0].delta.content = ""
                     model_response.choices[0].delta.content += (
                         "<think>" + reasoning_content
                     )
@@ -954,8 +1050,8 @@ class CustomStreamWrapper:
                 and not self.sent_last_thinking_block
                 and model_response.choices[0].delta.content
             ):
-                model_response.choices[0].delta.content = (
-                    "</think>" + model_response.choices[0].delta.content
+                model_response.choices[0].delta.content = "</think>" + (
+                    model_response.choices[0].delta.content or ""
                 )
                 self.sent_last_thinking_block = True
 
@@ -964,6 +1060,8 @@ class CustomStreamWrapper:
         return
 
     def chunk_creator(self, chunk: Any):  # type: ignore  # noqa: PLR0915
+        if hasattr(chunk, 'id'):
+            self.response_id = chunk.id
         model_response = self.model_response_creator()
         response_obj: Dict[str, Any] = {}
         try:
@@ -1345,6 +1443,9 @@ class CustomStreamWrapper:
                 if response_obj is None:
                     return
                 completion_obj["content"] = response_obj["text"]
+                self.intermittent_finish_reason = response_obj.get(
+                    "finish_reason", None
+                )
                 if response_obj["is_finished"]:
                     if response_obj["finish_reason"] == "error":
                         raise Exception(
@@ -1477,10 +1578,8 @@ class CustomStreamWrapper:
                                 )
                             )
                             model_response.choices[0].delta = Delta()
-                    elif (
-                        delta is not None and getattr(delta, "audio", None) is not None
-                    ):
-                        model_response.choices[0].delta.audio = delta.audio
+                    elif self._has_any_special_delta_attributes(delta):
+                        self._handle_special_delta_attributes(delta, model_response)
                     else:
                         try:
                             delta = (
@@ -1652,11 +1751,12 @@ class CustomStreamWrapper:
                             completion_start_time=datetime.datetime.now()
                         )
                     ## LOGGING
-                    executor.submit(
-                        self.run_success_logging_and_cache_storage,
-                        response,
-                        cache_hit,
-                    )  # log response
+                    if not litellm.disable_streaming_logging:
+                        executor.submit(
+                            self.run_success_logging_and_cache_storage,
+                            response,
+                            cache_hit,
+                        )  # log response
                     choice = response.choices[0]
                     if isinstance(choice, StreamingChoices):
                         self.response_uptil_now += choice.delta.get("content", "") or ""
@@ -1681,6 +1781,13 @@ class CustomStreamWrapper:
                         response = self.model_response_creator(
                             chunk=obj_dict, hidden_params=response._hidden_params
                         )
+                        ## check if empty
+                        is_empty = is_model_response_stream_empty(
+                            model_response=cast(ModelResponseStream, response)
+                        )
+
+                        if is_empty:
+                            continue
                     # add usage as hidden param
                     if self.sent_last_chunk is True and self.stream_options is None:
                         response._hidden_params["usage"] = self.final_usage_obj
@@ -1695,8 +1802,10 @@ class CustomStreamWrapper:
                 complete_streaming_response = litellm.stream_chunk_builder(
                     chunks=self.chunks,
                     messages=self.messages,
+                    logging_obj=self.logging_obj,
                     usage=usage_to_use,
                 )
+
                 response = self.model_response_creator()
                 if complete_streaming_response is not None:
                     setattr(
@@ -1840,9 +1949,20 @@ class CustomStreamWrapper:
 
                         # Create a new object without the removed attribute
                         processed_chunk = self.model_response_creator(chunk=obj_dict)
+                        is_empty = is_model_response_stream_empty(
+                            model_response=cast(ModelResponseStream, processed_chunk)
+                        )
+
+                        if is_empty:
+                            continue
                         cache_hit = processed_chunk.get("cached_content_token_count", 0) > 0
 
                     print_verbose(f"final returned processed chunk: {processed_chunk}")
+
+                    # add usage as hidden param
+                    if self.sent_last_chunk is True and self.stream_options is None:
+                        usage = calculate_total_usage(chunks=self.chunks)
+                        processed_chunk._hidden_params["usage"] = usage
                     return processed_chunk
                 raise StopAsyncIteration
             else:  # temporary patch for non-aiohttp async calls
@@ -1885,8 +2005,10 @@ class CustomStreamWrapper:
                 complete_streaming_response = litellm.stream_chunk_builder(
                     chunks=self.chunks,
                     messages=self.messages,
+                    logging_obj=self.logging_obj,
                     usage=usage_to_use,
                 )
+
                 response = self.model_response_creator()
                 if complete_streaming_response is not None:
                     setattr(
@@ -1958,13 +2080,25 @@ class CustomStreamWrapper:
                     self.logging_obj.async_failure_handler(e, traceback_exception)  # type: ignore
                 )
             ## Map to OpenAI Exception
-            raise exception_type(
-                model=self.model,
-                custom_llm_provider=self.custom_llm_provider,
-                original_exception=e,
-                completion_kwargs={},
-                extra_kwargs={},
-            )
+            try:
+                raise exception_type(
+                    model=self.model,
+                    custom_llm_provider=self.custom_llm_provider,
+                    original_exception=e,
+                    completion_kwargs={},
+                    extra_kwargs={},
+                )
+            except Exception as e:
+                from litellm.exceptions import MidStreamFallbackError
+
+                raise MidStreamFallbackError(
+                    message=str(e),
+                    model=self.model,
+                    llm_provider=self.custom_llm_provider or "anthropic",
+                    original_exception=e,
+                    generated_content=self.response_uptil_now,
+                    is_pre_first_chunk=not self.sent_first_chunk,
+                )
 
     @staticmethod
     def _strip_sse_data_from_chunk(chunk: Optional[str]) -> Optional[str]:

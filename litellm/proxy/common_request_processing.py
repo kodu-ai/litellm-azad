@@ -1,7 +1,7 @@
 import asyncio
 import json
+import logging
 import traceback
-import uuid
 from datetime import datetime
 from typing import (
     TYPE_CHECKING,
@@ -21,6 +21,7 @@ from fastapi.responses import Response, StreamingResponse
 
 import litellm
 from litellm._logging import verbose_proxy_logger
+from litellm._uuid import uuid
 from litellm.constants import (
     DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE,
     STREAM_SSE_DATA_PREFIX,
@@ -108,7 +109,6 @@ async def create_streaming_response(
     final_status_code = default_status_code
 
     try:
-
         # Handle coroutine that returns a generator
         if asyncio.iscoroutine(generator):
             generator = await generator
@@ -164,7 +164,6 @@ async def create_streaming_response(
             with tracer.trace(DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE):
                 yield first_chunk_value
         async for chunk in generator:
-
             with tracer.trace(DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE):
                 yield chunk
 
@@ -260,6 +259,7 @@ class ProxyBaseLLMRequestProcessing:
             "_arealtime",
             "aget_responses",
             "adelete_responses",
+            "acancel_responses",
             "acreate_batch",
             "aretrieve_batch",
             "afile_content",
@@ -273,6 +273,8 @@ class ProxyBaseLLMRequestProcessing:
             "agenerate_content",
             "agenerate_content_stream",
             "allm_passthrough_route",
+            "avector_store_search",
+            "avector_store_create",
         ],
         version: Optional[str] = None,
         user_model: Optional[str] = None,
@@ -282,6 +284,7 @@ class ProxyBaseLLMRequestProcessing:
         user_api_base: Optional[str] = None,
         model: Optional[str] = None,
     ) -> Tuple[dict, LiteLLMLoggingObj]:
+        start_time = datetime.now()  # start before calling guardrail hooks
         self.data = await add_litellm_data_to_request(
             data=self.data,
             request=request,
@@ -321,20 +324,24 @@ class ProxyBaseLLMRequestProcessing:
             "x-litellm-call-id", str(uuid.uuid4())
         )
         ### CALL HOOKS ### - modify/reject incoming data before calling the model
-        self.data = await proxy_logging_obj.pre_call_hook(  # type: ignore
-            user_api_key_dict=user_api_key_dict, data=self.data, call_type=route_type  # type: ignore
-        )
 
         ## LOGGING OBJECT ## - initialize logging object for logging success/failure events for call
         ## IMPORTANT Note: - initialize this before running pre-call checks. Ensures we log rejected requests to langfuse.
         logging_obj, self.data = litellm.utils.function_setup(
             original_function=route_type,
             rules_obj=litellm.utils.Rules(),
-            start_time=datetime.now(),
+            start_time=start_time,
             **self.data,
         )
 
         self.data["litellm_logging_obj"] = logging_obj
+
+        self.data = await proxy_logging_obj.pre_call_hook(  # type: ignore
+            user_api_key_dict=user_api_key_dict, data=self.data, call_type=route_type  # type: ignore
+        )
+
+        if "messages" in self.data and self.data["messages"]:
+            logging_obj.update_messages(self.data["messages"])
 
         return self.data, logging_obj
 
@@ -349,12 +356,15 @@ class ProxyBaseLLMRequestProcessing:
             "_arealtime",
             "aget_responses",
             "adelete_responses",
+            "acancel_responses",
             "atext_completion",
             "aimage_edit",
             "alist_input_items",
             "agenerate_content",
             "agenerate_content_stream",
             "allm_passthrough_route",
+            "avector_store_search",
+            "avector_store_create",
         ],
         proxy_logging_obj: ProxyLogging,
         general_settings: dict,
@@ -373,11 +383,12 @@ class ProxyBaseLLMRequestProcessing:
         """
         Common request processing logic for both chat completions and responses API endpoints
         """
-        verbose_proxy_logger.debug(
-            "Request received by LiteLLM:\n{}".format(
-                json.dumps(self.data, indent=4, default=str)
-            ),
-        )
+        if verbose_proxy_logger.isEnabledFor(logging.DEBUG):
+            verbose_proxy_logger.debug(
+                "Request received by LiteLLM:\n{}".format(
+                    json.dumps(self.data, indent=4, default=str)
+                ),
+            )
 
         self.data, logging_obj = await self.common_processing_pre_call_logic(
             request=request,
@@ -465,7 +476,6 @@ class ProxyBaseLLMRequestProcessing:
             if route_type == "allm_passthrough_route":
                 # Check if response is an async generator
                 if self._is_streaming_response(response):
-
                     if asyncio.iscoroutine(response):
                         generator = await response
                     else:
@@ -719,16 +729,30 @@ class ProxyBaseLLMRequestProcessing:
         """
         Anthropic /messages and Google /generateContent streaming data generator require SSE events
         """
+        from litellm.types.utils import ModelResponse, ModelResponseStream
+
         verbose_proxy_logger.debug("inside generator")
         try:
-            async for chunk in response:
+            str_so_far = ""
+            async for chunk in proxy_logging_obj.async_post_call_streaming_iterator_hook(
+                user_api_key_dict=user_api_key_dict,
+                response=response,
+                request_data=request_data,
+            ):
                 verbose_proxy_logger.debug(
                     "async_data_generator: received streaming chunk - {}".format(chunk)
                 )
                 ### CALL HOOKS ### - modify outgoing data
                 chunk = await proxy_logging_obj.async_post_call_streaming_hook(
-                    user_api_key_dict=user_api_key_dict, response=chunk
+                    user_api_key_dict=user_api_key_dict,
+                    response=chunk,
+                    data=request_data,
+                    str_so_far=str_so_far,
                 )
+
+                if isinstance(chunk, (ModelResponse, ModelResponseStream)):
+                    response_str = litellm.get_response_string(response_obj=chunk)
+                    str_so_far += response_str
 
                 # Format chunk using helper function
                 yield ProxyBaseLLMRequestProcessing.return_sse_chunk(chunk)

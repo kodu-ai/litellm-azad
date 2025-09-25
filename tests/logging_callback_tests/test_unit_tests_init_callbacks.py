@@ -33,6 +33,7 @@ expected_env_vars = {
     "LAGO_API_BASE": "mock_base",
     "LAGO_API_EVENT_CODE": "mock_event_code",
     "OPENMETER_API_KEY": "openmeter_api_key",
+    "BRAINTRUST_API_BASE": "braintrust_api_base",
     "BRAINTRUST_API_KEY": "braintrust_api_key",
     "GALILEO_API_KEY": "galileo_api_key",
     "LITERAL_API_KEY": "literal_api_key",
@@ -91,6 +92,9 @@ async def use_callback_in_llm_call(
     callback: str, used_in: Literal["callbacks", "success_callback"]
 ):
     if callback == "dynamic_rate_limiter":
+        # internal CustomLogger class that expects internal_usage_cache passed to it, it always fails when tested in this way
+        return
+    elif callback == "dynamic_rate_limiter_v3":
         # internal CustomLogger class that expects internal_usage_cache passed to it, it always fails when tested in this way
         return
     elif callback == "argilla":

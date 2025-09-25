@@ -1,6 +1,5 @@
 import json
 import time
-import uuid
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
@@ -33,13 +32,16 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from typing_extensions import Callable, Dict, Required, TypedDict, override
 
 import litellm
+from litellm._uuid import uuid
 from litellm.types.llms.base import (
     BaseLiteLLMOpenAIResponseObject,
     LiteLLMPydanticObjectBase,
 )
+from litellm.types.mcp import MCPServerCostInfo
 
 from ..litellm_core_utils.core_helpers import map_finish_reason
 from .guardrails import GuardrailEventHooks
+from .llms.base import HiddenParams
 from .llms.openai import (
     Batch,
     ChatCompletionAnnotation,
@@ -49,6 +51,7 @@ from .llms.openai import (
     ChatCompletionUsageBlock,
     FileSearchTool,
     FineTuningJob,
+    ImageURLListItem,
     OpenAIChatCompletionChunk,
     OpenAIFileObject,
     OpenAIRealtimeStreamList,
@@ -119,11 +122,16 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     max_input_tokens: Required[Optional[int]]
     max_output_tokens: Required[Optional[int]]
     input_cost_per_token: Required[float]
+    input_cost_per_token_flex: Optional[float]  # OpenAI flex service tier pricing
+    input_cost_per_token_priority: Optional[float]  # OpenAI priority service tier pricing
     cache_creation_input_token_cost: Optional[float]
+    cache_creation_input_token_cost_above_1hr: Optional[float]
+    cache_read_input_token_cost: Optional[float]
+    cache_read_input_token_cost_flex: Optional[float]  # OpenAI flex service tier pricing
+    cache_read_input_token_cost_priority: Optional[float]  # OpenAI priority service tier pricing
     cache_creation_input_token_cost_above_128k_tokens: Optional[float]
     cache_creation_input_token_cost_above_200k_tokens: Optional[float]
     cache_creation_input_audio_token_cost: Optional[float]
-    cache_read_input_token_cost: Optional[float]
     cache_read_input_token_cost_above_128k_tokens: Optional[float]
     cache_read_input_token_cost_above_200k_tokens: Optional[float]
     cache_read_input_audio_token_cost: Optional[float]
@@ -144,6 +152,8 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     input_cost_per_token_batches: Optional[float]
     output_cost_per_token_batches: Optional[float]
     output_cost_per_token: Required[float]
+    output_cost_per_token_flex: Optional[float]  # OpenAI flex service tier pricing
+    output_cost_per_token_priority: Optional[float]  # OpenAI priority service tier pricing
     output_cost_per_character: Optional[float]  # only for vertex ai models
     output_cost_per_audio_token: Optional[float]
     output_cost_per_token_above_128k_tokens: Optional[
@@ -165,10 +175,18 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
         SearchContextCostPerQuery
     ]  # Cost for using web search tool
     citation_cost_per_token: Optional[float]  # Cost per citation token for Perplexity
+    tiered_pricing: Optional[
+        List[Dict[str, Any]]
+    ]  # Tiered pricing structure for models like Dashscope
     litellm_provider: Required[str]
     mode: Required[
         Literal[
-            "completion", "embedding", "image_generation", "chat", "audio_transcription"
+            "completion",
+            "embedding",
+            "image_generation",
+            "chat",
+            "audio_transcription",
+            "responses",
         ]
     ]
     tpm: Optional[int]
@@ -273,6 +291,11 @@ class CallTypes(Enum):
     agenerate_content = "agenerate_content"
     generate_content_stream = "generate_content_stream"
     agenerate_content_stream = "agenerate_content_stream"
+
+    #########################################################
+    # MCP Call Types
+    #########################################################
+    call_mcp_tool = "call_mcp_tool"
 
 
 CallTypesLiteral = Literal[
@@ -468,40 +491,6 @@ class ChatCompletionDeltaToolCall(OpenAIObject):
         setattr(self, key, value)
 
 
-class HiddenParams(OpenAIObject):
-    original_response: Optional[Union[str, Any]] = None
-    model_id: Optional[str] = None  # used in Router for individual deployments
-    api_base: Optional[str] = None  # returns api base used for making completion call
-    _response_ms: Optional[float] = None
-
-    model_config = ConfigDict(extra="allow", protected_namespaces=())
-
-    def get(self, key, default=None):
-        # Custom .get() method to access attributes with a default value if the attribute doesn't exist
-        return getattr(self, key, default)
-
-    def __getitem__(self, key):
-        # Allow dictionary-style access to attributes
-        return getattr(self, key)
-
-    def __setitem__(self, key, value):
-        # Allow dictionary-style assignment of attributes
-        setattr(self, key, value)
-
-    def json(self, **kwargs):  # type: ignore
-        try:
-            return self.model_dump()  # noqa
-        except Exception:
-            # if using pydantic v1
-            return self.dict()
-
-    def model_dump(self, **kwargs):
-        # Override model_dump to include private attributes
-        data = super().model_dump(**kwargs)
-        data["_response_ms"] = self._response_ms
-        return data
-
-
 class ChatCompletionMessageToolCall(OpenAIObject):
     def __init__(
         self,
@@ -600,6 +589,7 @@ class Message(OpenAIObject):
     tool_calls: Optional[List[ChatCompletionMessageToolCall]]
     function_call: Optional[FunctionCall]
     audio: Optional[ChatCompletionAudioResponse] = None
+    images: Optional[List[ImageURLListItem]] = None
     reasoning_content: Optional[str] = None
     thinking_blocks: Optional[
         List[Union[ChatCompletionThinkingBlock, ChatCompletionRedactedThinkingBlock]]
@@ -616,6 +606,7 @@ class Message(OpenAIObject):
         function_call=None,
         tool_calls: Optional[list] = None,
         audio: Optional[ChatCompletionAudioResponse] = None,
+        images: Optional[List[ImageURLListItem]] = None,
         provider_specific_fields: Optional[Dict[str, Any]] = None,
         reasoning_content: Optional[str] = None,
         thinking_blocks: Optional[
@@ -649,6 +640,9 @@ class Message(OpenAIObject):
         if audio is not None:
             init_values["audio"] = audio
 
+        if images is not None:
+            init_values["images"] = images
+
         if thinking_blocks is not None:
             init_values["thinking_blocks"] = thinking_blocks
 
@@ -668,6 +662,10 @@ class Message(OpenAIObject):
             # OpenAI compatible APIs like mistral API will raise an error if audio is passed in
             if hasattr(self, "audio"):
                 del self.audio
+
+        if images is None:
+            if hasattr(self, "images"):
+                del self.images
 
         if annotations is None:
             # ensure default response matches OpenAI spec
@@ -721,6 +719,7 @@ class Delta(OpenAIObject):
         function_call=None,
         tool_calls=None,
         audio: Optional[ChatCompletionAudioResponse] = None,
+        images: Optional[List[ImageURLListItem]] = None,
         reasoning_content: Optional[str] = None,
         thinking_blocks: Optional[
             List[
@@ -738,6 +737,7 @@ class Delta(OpenAIObject):
         self.function_call: Optional[Union[FunctionCall, Any]] = None
         self.tool_calls: Optional[List[Union[ChatCompletionDeltaToolCall, Any]]] = None
         self.audio: Optional[ChatCompletionAudioResponse] = None
+        self.images: Optional[List[ImageURLListItem]] = None
         self.annotations: Optional[List[ChatCompletionAnnotation]] = None
 
         if reasoning_content is not None:
@@ -758,16 +758,23 @@ class Delta(OpenAIObject):
         else:
             del self.annotations
 
+        if images is not None and len(images) > 0:
+            self.images = images
+        else:
+            del self.images
+
         if function_call is not None and isinstance(function_call, dict):
             self.function_call = FunctionCall(**function_call)
         else:
             self.function_call = function_call
         if tool_calls is not None and isinstance(tool_calls, list):
             self.tool_calls = []
+            current_index = 0
             for tool_call in tool_calls:
                 if isinstance(tool_call, dict):
                     if tool_call.get("index", None) is None:
-                        tool_call["index"] = 0
+                        tool_call["index"] = current_index
+                        current_index += 1
                     self.tool_calls.append(ChatCompletionDeltaToolCall(**tool_call))
                 elif isinstance(tool_call, ChatCompletionDeltaToolCall):
                     self.tool_calls.append(tool_call)
@@ -869,6 +876,11 @@ class CompletionTokensDetailsWrapper(
     """Text tokens generated by the model."""
 
 
+class CacheCreationTokenDetails(BaseModel):
+    ephemeral_5m_input_tokens: Optional[int] = None
+    ephemeral_1h_input_tokens: Optional[int] = None
+
+
 class PromptTokensDetailsWrapper(
     PromptTokensDetails
 ):  # wrapper for older openai versions
@@ -890,6 +902,12 @@ class PromptTokensDetailsWrapper(
     video_length_seconds: Optional[float] = None
     """Length of videos sent to the model. Used for Vertex AI multimodal embeddings."""
 
+    cache_creation_tokens: Optional[int] = None
+    """Number of cache creation tokens sent to the model. Used for Anthropic prompt caching."""
+
+    cache_creation_token_details: Optional[CacheCreationTokenDetails] = None
+    """Details of cache creation tokens sent to the model. Used for tracking 5m/1h cache creation tokens for Anthropic prompt caching."""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.character_count is None:
@@ -900,6 +918,10 @@ class PromptTokensDetailsWrapper(
             del self.video_length_seconds
         if self.web_search_requests is None:
             del self.web_search_requests
+        if self.cache_creation_tokens is None:
+            del self.cache_creation_tokens
+        if self.cache_creation_token_details is None:
+            del self.cache_creation_token_details
 
 
 class ServerToolUse(BaseModel):
@@ -932,6 +954,13 @@ class Usage(CompletionUsage):
     cache_read_input_tokens: Optional[int] = None
 
     server_tool_use: Optional[ServerToolUse] = None
+    cost: Optional[float] = None
+
+    completion_tokens_details: Optional[CompletionTokensDetailsWrapper] = None
+    """Breakdown of tokens used in a completion."""
+
+    prompt_tokens_details: Optional[PromptTokensDetailsWrapper] = None
+    """Breakdown of tokens used in the prompt."""
 
     def __init__(
         self,
@@ -939,11 +968,14 @@ class Usage(CompletionUsage):
         completion_tokens: Optional[int] = None,
         total_tokens: Optional[int] = None,
         reasoning_tokens: Optional[int] = None,
-        prompt_tokens_details: Optional[Union[PromptTokensDetailsWrapper, dict]] = None,
+        prompt_tokens_details: Optional[
+            Union[PromptTokensDetailsWrapper, PromptTokensDetails, dict]
+        ] = None,
         completion_tokens_details: Optional[
             Union[CompletionTokensDetailsWrapper, dict]
         ] = None,
         server_tool_use: Optional[ServerToolUse] = None,
+        cost: Optional[float] = None,
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
         **params,
@@ -969,12 +1001,18 @@ class Usage(CompletionUsage):
 
         # handle prompt_tokens_details
         _prompt_tokens_details: Optional[PromptTokensDetailsWrapper] = None
+
+        # guarantee prompt_token_details is always a PromptTokensDetailsWrapper
         if prompt_tokens_details:
             if isinstance(prompt_tokens_details, dict):
                 _prompt_tokens_details = PromptTokensDetailsWrapper(
                     **prompt_tokens_details
                 )
             elif isinstance(prompt_tokens_details, PromptTokensDetails):
+                _prompt_tokens_details = PromptTokensDetailsWrapper(
+                    **prompt_tokens_details.model_dump()
+                )
+            elif isinstance(prompt_tokens_details, PromptTokensDetailsWrapper):
                 _prompt_tokens_details = prompt_tokens_details
 
         ## DEEPSEEK MAPPING ##
@@ -999,6 +1037,18 @@ class Usage(CompletionUsage):
             else:
                 _prompt_tokens_details.cached_tokens = params["cache_read_input_tokens"]
 
+        if "cache_creation_input_tokens" in params and isinstance(
+            params["cache_creation_input_tokens"], int
+        ):
+            if _prompt_tokens_details is None:
+                _prompt_tokens_details = PromptTokensDetailsWrapper(
+                    cache_creation_tokens=params["cache_creation_input_tokens"]
+                )
+            else:
+                _prompt_tokens_details.cache_creation_tokens = params[
+                    "cache_creation_input_tokens"
+                ]
+
         super().__init__(
             prompt_tokens=prompt_tokens or 0,
             completion_tokens=completion_tokens or 0,
@@ -1015,6 +1065,11 @@ class Usage(CompletionUsage):
             self.server_tool_use = server_tool_use
         else:  # maintain openai compatibility in usage object if possible
             del self.server_tool_use
+
+        if cost is not None:
+            self.cost = cost
+        else:
+            del self.cost
 
         ## ANTHROPIC MAPPING ##
         if "cache_creation_input_tokens" in params and isinstance(
@@ -1652,7 +1707,7 @@ class ImageResponse(OpenAIImageResponse, BaseLiteLLMOpenAIResponseObject):
 
     usage: Optional[ImageUsage] = None  # type: ignore
     """
-    Users might use litellm with older python versions, we don't want this to break for them. 
+    Users might use litellm with older python versions, we don't want this to break for them.
     Happens when their OpenAIImageResponse has the old OpenAI usage class.
     """
 
@@ -1823,6 +1878,9 @@ class AdapterCompletionStreamWrapper:
 class StandardLoggingUserAPIKeyMetadata(TypedDict):
     user_api_key_hash: Optional[str]  # hash of the litellm virtual key used
     user_api_key_alias: Optional[str]
+    user_api_key_spend: Optional[float]
+    user_api_key_max_budget: Optional[float]
+    user_api_key_budget_reset_at: Optional[str]
     user_api_key_org_id: Optional[str]
     user_api_key_team_id: Optional[str]
     user_api_key_user_id: Optional[str]
@@ -1856,6 +1914,18 @@ class StandardLoggingMCPToolCall(TypedDict, total=False):
     Optional logo URL of the MCP server that the tool call was made to
 
     (this is to render the logo on the logs page on litellm ui)
+    """
+
+    namespaced_tool_name: Optional[str]
+    """
+    Namespaced tool name of the MCP tool that the tool call was made to
+
+    Includes the server name prefix if it exists - eg. `deepwiki-mcp/get_page_content`
+    """
+
+    mcp_server_cost_info: Optional[MCPServerCostInfo]
+    """
+    Cost per query for the MCP server tool call
     """
 
 
@@ -1932,6 +2002,9 @@ class StandardLoggingMetadata(StandardLoggingUserAPIKeyMetadata):
     vector_store_request_metadata: Optional[List[StandardLoggingVectorStoreRequest]]
     applied_guardrails: Optional[List[str]]
     usage_object: Optional[dict]
+    cold_storage_object_key: Optional[
+        str
+    ]  # S3/GCS object key for cold storage retrieval
 
 
 class StandardLoggingAdditionalHeaders(TypedDict, total=False):
@@ -1985,12 +2058,20 @@ class StandardLoggingPayloadErrorInformation(TypedDict, total=False):
     error_message: Optional[str]
 
 
+class GuardrailMode(TypedDict, total=False):
+    tags: Optional[Dict[str, str]]
+    default: Optional[str]
+
+
 class StandardLoggingGuardrailInformation(TypedDict, total=False):
     guardrail_name: Optional[str]
-    guardrail_mode: Optional[Union[GuardrailEventHooks, List[GuardrailEventHooks]]]
+    guardrail_provider: Optional[str]
+    guardrail_mode: Optional[
+        Union[GuardrailEventHooks, List[GuardrailEventHooks], GuardrailMode]
+    ]
     guardrail_request: Optional[dict]
     guardrail_response: Optional[Union[dict, str, List[dict]]]
-    guardrail_status: Literal["success", "failure"]
+    guardrail_status: Literal["success", "failure", "blocked"]
     start_time: Optional[float]
     end_time: Optional[float]
     duration: Optional[float]
@@ -2089,6 +2170,9 @@ class StandardCallbackDynamicParams(TypedDict, total=False):
     langfuse_secret_key: Optional[str]
     langfuse_host: Optional[str]
 
+    # Langfuse prompt version
+    langfuse_prompt_version: Optional[int]
+
     # GCS dynamic params
     gcs_bucket_name: Optional[str]
     gcs_path_service_account: Optional[str]
@@ -2097,6 +2181,7 @@ class StandardCallbackDynamicParams(TypedDict, total=False):
     langsmith_api_key: Optional[str]
     langsmith_project: Optional[str]
     langsmith_base_url: Optional[str]
+    langsmith_sampling_rate: Optional[float]
 
     # Humanloop dynamic params
     humanloop_api_key: Optional[str]
@@ -2104,15 +2189,19 @@ class StandardCallbackDynamicParams(TypedDict, total=False):
     # Arize dynamic params
     arize_api_key: Optional[str]
     arize_space_key: Optional[str]
+    arize_space_id: Optional[str]
 
     # Logging settings
     turn_off_message_logging: Optional[bool]  # when true will not log messages
+    litellm_disabled_callbacks: Optional[List[str]]
 
 
 all_litellm_params = [
     "metadata",
     "litellm_metadata",
     "litellm_trace_id",
+    "litellm_request_debug",
+    "guardrails",
     "tags",
     "acompletion",
     "aimg_generation",
@@ -2128,6 +2217,7 @@ all_litellm_params = [
     "prompt_id",
     "provider_specific_header",
     "prompt_variables",
+    "prompt_version",
     "api_base",
     "force_timeout",
     "logger_fn",
@@ -2164,6 +2254,7 @@ all_litellm_params = [
     "hf_model_name",
     "model_info",
     "proxy_server_request",
+    "secret_fields",
     "preset_cache_key",
     "caching_groups",
     "ttl",
@@ -2258,6 +2349,7 @@ class LlmProviders(str, Enum):
     CLARIFAI = "clarifai"
     ANTHROPIC = "anthropic"
     ANTHROPIC_TEXT = "anthropic_text"
+    BYTEZ = "bytez"
     REPLICATE = "replicate"
     HUGGINGFACE = "huggingface"
     TOGETHER_AI = "together_ai"
@@ -2290,6 +2382,11 @@ class LlmProviders(str, Enum):
     VOLCENGINE = "volcengine"
     CODESTRAL = "codestral"
     TEXT_COMPLETION_CODESTRAL = "text-completion-codestral"
+    DASHSCOPE = "dashscope"
+    MOONSHOT = "moonshot"
+    V0 = "v0"
+    MORPH = "morph"
+    LAMBDA_AI = "lambda_ai"
     DEEPSEEK = "deepseek"
     SAMBANOVA = "sambanova"
     MARITALK = "maritalk"
@@ -2306,6 +2403,7 @@ class LlmProviders(str, Enum):
     DATABRICKS = "databricks"
     EMPOWER = "empower"
     GITHUB = "github"
+    COMPACTIFAI = "compactifai"
     CUSTOM = "custom"
     LITELLM_PROXY = "litellm_proxy"
     HOSTED_VLLM = "hosted_vllm"
@@ -2322,9 +2420,23 @@ class LlmProviders(str, Enum):
     HUMANLOOP = "humanloop"
     TOPAZ = "topaz"
     ASSEMBLYAI = "assemblyai"
+    GITHUB_COPILOT = "github_copilot"
     SNOWFLAKE = "snowflake"
+    GRADIENT_AI = "gradient_ai"
     LLAMA = "meta_llama"
     NSCALE = "nscale"
+    PG_VECTOR = "pg_vector"
+    HYPERBOLIC = "hyperbolic"
+    RECRAFT = "recraft"
+    HEROKU = "heroku"
+    AIML = "aiml"
+    COMETAPI = "cometapi"
+    OCI = "oci"
+    AUTO_ROUTER = "auto_router"
+    VERCEL_AI_GATEWAY = "vercel_ai_gateway"
+    DOTPROMPT = "dotprompt"
+    WANDB = "wandb"
+    OVHCLOUD = "ovhcloud"
 
 
 # Create a set of all provider values for quick lookup
@@ -2345,6 +2457,17 @@ class LiteLLMLoggingBaseClass:
         self, original_response, input=None, api_key=None, additional_args={}
     ):
         pass
+
+
+class TokenCountResponse(LiteLLMPydanticObjectBase):
+    total_tokens: int
+    request_model: str
+    model_used: str
+    tokenizer_type: str
+    original_response: Optional[dict] = None
+    """
+    Original Response from upstream API call - if an API call was made for token counting
+    """
 
 
 class CustomHuggingfaceTokenizer(TypedDict):
@@ -2499,6 +2622,12 @@ class SpecialEnums(Enum):
     LITELLM_MANAGED_GENERIC_RESPONSE_COMPLETE_STR = "litellm_proxy;model_id:{};generic_response_id:{}"  # generic implementation of 'managed batches' - used for finetuning and any future work.
 
 
+class ServiceTier(Enum):
+    """Enum for service tier types used in cost calculations."""
+    FLEX = "flex"
+    PRIORITY = "priority"
+
+
 LLMResponseTypes = Union[
     ModelResponse,
     EmbeddingResponse,
@@ -2536,3 +2665,18 @@ CostResponseTypes = Union[
     ImageResponse,
     TranscriptionResponse,
 ]
+
+
+class PriorityReservationSettings(BaseModel):
+    """
+    Settings for priority-based rate limiting reservation.
+    
+    Defines what priority to assign to keys without explicit priority metadata.
+    The priority_reservation mapping is configured separately via litellm.priority_reservation.
+    """
+    default_priority: float = Field(
+        default=0.5,
+        description="Priority level to assign to API keys without explicit priority metadata. Should match a key in litellm.priority_reservation."
+    )
+
+    model_config = ConfigDict(protected_namespaces=())
