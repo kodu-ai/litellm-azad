@@ -142,9 +142,9 @@ class OpenRouterChatCompletionStreamingHandler(BaseModelResponseIterator):
                     reasoning_details = choice["delta"].get("reasoning_details")
                     if reasoning_details and isinstance(reasoning_details, list) and len(reasoning_details) > 0:
                         # [{'type': 'reasoning.encrypted', 'data':  print if it's type 'reasoning.encrypted'
-                        if (isinstance(reasoning_details[0], dict) and 
-                            reasoning_details[0].get("type") == "reasoning.encrypted"):
-                            print(f"Encrypted reasoning details found first 80 chars: {reasoning_details[0].get('data', '')[:80]}...")
+                        # if (isinstance(reasoning_details[0], dict) and 
+                        #     reasoning_details[0].get("type") == "reasoning.encrypted"):
+                        #     print(f"Encrypted reasoning details found first 80 chars: {reasoning_details[0].get('data', '')[:80]}...")
                         first_thinking_block = reasoning_details[0]
                         if (isinstance(first_thinking_block, dict) and 
                             first_thinking_block.get("type") == "reasoning.text" and
