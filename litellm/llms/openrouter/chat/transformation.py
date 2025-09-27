@@ -136,9 +136,15 @@ class OpenRouterChatCompletionStreamingHandler(BaseModelResponseIterator):
                     )
 
                     # Process reasoning_details safely
-                    print(f"Choice: {choice}")
+                    # print(f"Choice: {choice}")
+                    # Choice: {'index': 0, 'delta': {'role': 'assistant', 'content': '', 'reasoning': ' the', 'reasoning_details': [{'type': 'reasoning.summary', 'summary': ' the', 'format': 'openai-responses-v1', 'index': 0}], 'reasoning_content': ' the'}, 'finish_reason': None, 'native_finish_reason': None, 'logprobs': None}
+                    # Choice: {'index': 0, 'delta': {'role': 'assistant', 'content': '', 'reasoning': ' emotional', 'reasoning_details': [{'type': 'reasoning.summary', 'summary': ' emotional', 'format': 'openai-responses-v1', 'index': 0}], 'reasoning_content': ' emotional'}, 'finish_reason': None, 'native_finish_reason': None, 'logprobs': None}
                     reasoning_details = choice["delta"].get("reasoning_details")
                     if reasoning_details and isinstance(reasoning_details, list) and len(reasoning_details) > 0:
+                        # [{'type': 'reasoning.encrypted', 'data':  print if it's type 'reasoning.encrypted'
+                        if (isinstance(reasoning_details[0], dict) and 
+                            reasoning_details[0].get("type") == "reasoning.encrypted"):
+                            print(f"Encrypted reasoning details found first 80 chars: {reasoning_details[0].get('data', '')[:80]}...")
                         first_thinking_block = reasoning_details[0]
                         if (isinstance(first_thinking_block, dict) and 
                             first_thinking_block.get("type") == "reasoning.text" and
@@ -154,7 +160,15 @@ class OpenRouterChatCompletionStreamingHandler(BaseModelResponseIterator):
                                 )
                             )
 
+                        # Persist reasoning_details downstream for clients that rely on it
+                        try:
+                            psf = choice["delta"].setdefault("provider_specific_fields", {})
+                            psf["reasoning_details"] = reasoning_details
+                        except Exception:
+                            pass
+
                     delta = Delta(**choice["delta"])
+                    delta['reasoning_details'] = reasoning_details  # keep reasoning_details in delta for clients that rely on it
 
                 if "finish_reason" in choice:
                     finish_reason = choice["finish_reason"]
